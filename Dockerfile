@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY patrol-sim-std/backend /app/backend
-COPY patrol-sim-std/frontend /app/frontend
+COPY backend /app/backend
+COPY frontend /app/frontend
 
 WORKDIR /app/backend
 
