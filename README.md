@@ -14,17 +14,43 @@
 | 后端 | Python Flask，六个 REST 接口 |
 | 绘图 | Canvas 2D，DPR 适配 |
 | 仿真 | 纯 Python 标准库：机器人运动、BFS 寻路、虚拟传感器 |
+| CI流水线 | GitHub Actions |
+| Docker部署 | Docker Compose |
 
 ## 快速开始
 
 ```bash
+# Linux / MacOS
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r backend/requirements.txt
 python backend/app.py
 ```
+```bash
+# Windows
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r backend/requirements.txt
+python backend/app.py
+```
 
 打开 <http://localhost:5050>。端口可用环境变量覆盖：`PORT=8000 python backend/app.py`。
+
+### Docker Compose 部署
+
+> 在**项目根目录**执行
+
+```bash
+docker compose build
+docker compose up
+```
+
+访问地址：<http://localhost:5050>
+停止服务：
+
+```bash
+docker compose down
+```
 
 ## 功能
 
@@ -51,21 +77,28 @@ python backend/app.py
 ## 项目结构
 
 ```
-patrol-sim/
+patrol-sim-std/
+├─ .github/workflows/      # GitHub‑CI 流水线配置
 ├─ frontend/
-│  ├─ index.html          # 科技 HUD 单页，Canvas 渲染与按钮交互
+│  ├─ index.html           # 科技 HUD 单页，Canvas 渲染与按钮交互
 │  └─ README.md
 ├─ backend/
-│  ├─ app.py              # Flask 入口，六个 API + 托管前端
+│  ├─ app.py               # Flask 入口，六个 API + 托管前端
 │  ├─ requirements.txt
+│  ├─ test/                # 单元测试用例
 │  └─ README.md
 ├─ docs/
-│  └─ 03_项目架构与接口.md
+│  ├─ 02_小组分工.md
+│  ├─ 03_项目架构与接口.md
+│  └─ 04_运行与结业提交.md
 ├─ README.md
-└─ .gitignore
+├─ .gitignore
+├─ Dockerfile
+├─ docker‑compose.yml
+└─ AGENTS.md               # 小组协作开发约定
 ```
 
-`backend/sim/` 下三个模块（`robot_sim.py`、`path_planner.py`、`sensor_sim.py`）由各模块负责人按 `docs/03` 的契约交付后放入该目录，`app.py` 直接导入使用。
+`backend/sim/` 下三个模块（`robot_sim.py`、`path_planner.py`、`sensor_sim.py`）由各模块负责人按 `docs/03_项目架构与接口.md` 的契约交付后放入该目录，`app.py` 直接导入使用。
 
 ## 接口一览
 
@@ -91,6 +124,9 @@ PORT=8000 python backend/app.py  # 换端口
 
 ## 文档索引
 
+- [02 小组分工](docs/02_小组分工.md)
 - [03 项目架构与接口](docs/03_项目架构与接口.md)
+- [04 运行与结业提交](docs/04_运行与结业提交.md)
 - [后端说明](backend/README.md)
 - [前端说明](frontend/README.md)
+- [协作开发约定 AGENTS.md](AGENTS.md)
