@@ -7,7 +7,6 @@
 <style>
   :root{
     --bg:#0a1929;
-    --bg2:#071320;
     --panel:rgba(12,32,54,.72);
     --line:rgba(0,229,255,.22);
     --blue:#1e90ff;
@@ -107,13 +106,17 @@
   .btn.ghost{border-color:rgba(214,228,255,.25);background:transparent;color:var(--muted);}
   .btn.ghost:hover{color:var(--text);border-color:rgba(214,228,255,.45);box-shadow:none;}
 
-  .speed{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
-  .speed button{
-    padding:8px 0;font-size:12px;border-radius:5px;cursor:pointer;font-family:inherit;
-    background:rgba(255,255,255,.03);border:1px solid rgba(0,229,255,.22);color:var(--muted);
-    transition:.15s;
+  .speedbox{display:flex;flex-direction:column;gap:7px;}
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;
+    background:linear-gradient(90deg,var(--cyan),rgba(0,229,255,.15));outline:none;
   }
-  .speed button.on{color:#071320;background:var(--cyan);border-color:var(--cyan);box-shadow:0 0 16px rgba(0,229,255,.5);font-weight:700;}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+    background:var(--cyan);box-shadow:0 0 12px rgba(0,229,255,.8);cursor:pointer;
+  }
+  .speedlbl{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);}
+  .speedlbl b{color:var(--cyan);font-weight:600;}
   .hint{font-size:11px;line-height:1.7;color:var(--muted);}
   .hint b{color:var(--pass);font-weight:600;}
 
@@ -151,7 +154,7 @@
   .card.warn .value{color:var(--warn);}
   .card.bad .value{color:var(--danger);}
   .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.08);margin-top:9px;overflow:hidden;}
-  .bar span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--blue));transition:width .2s;}
+  .bar span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--blue));transition:width .3s;}
 
   /* ---------- 告警弹窗 ---------- */
   #alerts{
@@ -210,16 +213,15 @@
         <button class="btn primary" id="btnStart">启动自动巡检</button>
         <button class="btn danger" id="btnStop">停止任务</button>
         <button class="btn ghost" id="btnClear">清空巡检点</button>
-        <button class="btn ghost" id="btnReset">复位系统</button>
       </div>
 
       <div class="block">
         <h2>仿真速度</h2>
-        <div class="speed" id="speed">
-          <button data-speed="0.5">0.5x</button>
-          <button data-speed="1" class="on">1x</button>
-          <button data-speed="2">2x</button>
-          <button data-speed="4">4x</button>
+        <div class="speedbox">
+          <input type="range" id="speed" min="0" max="3" step="1" value="1">
+          <div class="speedlbl">
+            <span>0.5x</span><span><b id="speedNow">1x</b></span><span>4x</span>
+          </div>
         </div>
       </div>
 
@@ -271,21 +273,27 @@
 
   var SIZE = 20, PAD = 20, CELL = 28;
   var W = SIZE * CELL + PAD * 2;
+  var SPEEDS = [0.5, 1, 2, 4];
 
   var canvas = document.getElementById("map");
   var ctx = canvas.getContext("2d");
   var dpr = window.devicePixelRatio || 1;
   canvas.width = W * dpr;
   canvas.height = W * dpr;
-  canvas.style.width = "min(600px,100%)";
   ctx.scale(dpr, dpr);
 
-  var map = { size: SIZE, obstacles: [], patrol_points: [], max_patrol_points: 6 };
+  var map = { size: SIZE, obstacles: [], max_patrol_points: 6 };
   var obstacles = [];
-  var state = null;
+  var robot = null;
+  var sensor = null;
   var patrolPoints = [];
+  var plan = [];
+  var pathIndex = 0;
   var speed = 1;
-  var seenAlerts = {};
+  var speedIdx = 1;
+  var lastAlert = null;
+  var prevCollision = false;
+  var prevOut = false;
   var polling = false;
 
   /* ---------- 工具 ---------- */
@@ -293,36 +301,28 @@
     var opt = options || {};
     opt.headers = { "Content-Type": "application/json" };
     return fetch(path, opt).then(function (r) {
-      return r.json();
+      return r.json().then(function (d) { return { code: r.status, data: d }; });
     });
   }
 
-  function glyph(type) {
-    if (type === "collision") return "⛔";
-    if (type === "out_bound") return "⚠";
-    return "✖";
-  }
-
-  function titleOf(type) {
-    if (type === "collision") return "碰撞告警";
-    if (type === "out_bound") return "越界告警";
-    return "路径规划失败";
-  }
-
-  function toast(type, msg, key) {
-    if (key && seenAlerts[key]) return;
-    if (key) seenAlerts[key] = true;
-
+  function toast(type, msg) {
     var layer = document.getElementById("alerts");
     var el = document.createElement("div");
-    el.className = "alert" + (type === "out_bound" ? " warn" : "");
+    var title = type === "collision" ? "碰撞告警" :
+                type === "out_bound" ? "越界告警" : "任务提示";
+    var ico = type === "collision" ? "⛔" : type === "out_bound" ? "⚠" : "✖";
+    el.className = "alert" + (type === "out_bound" || type === "plan_failed" ? " warn" : "");
     el.innerHTML =
-      '<span class="ico">' + glyph(type) + "</span>" +
-      '<div class="body"><span class="t">' + titleOf(type) + "</span>" + msg + "</div>" +
+      '<span class="ico">' + ico + "</span>" +
+      '<div class="body"><span class="t">' + title + "</span>" +
+      String(msg).replace(/[<>&]/g, "") + "</div>" +
       '<button class="x">✕</button>';
     el.querySelector(".x").onclick = function () { el.remove(); };
     layer.appendChild(el);
     setTimeout(function () { if (el.parentNode) el.remove(); }, 4200);
+
+    lastAlert = { type: type, msg: msg };
+    renderCards();
   }
 
   /* ---------- 绘制 ---------- */
@@ -339,7 +339,6 @@
     ctx.rect(PAD, PAD, SIZE * CELL, SIZE * CELL);
     ctx.fill();
 
-    // 网格
     ctx.strokeStyle = "rgba(0,229,255,0.10)";
     ctx.lineWidth = 1;
     for (var i = 0; i <= SIZE; i++) {
@@ -353,7 +352,6 @@
       ctx.stroke();
     }
 
-    // 障碍物
     obstacles.forEach(function (o) {
       var x = px(o[0]), y = px(o[1]);
       ctx.fillStyle = "rgba(58,22,34,0.95)";
@@ -368,59 +366,54 @@
       ctx.stroke();
     });
 
-    if (state) {
-      var full = state.full_path || [];
-      var idx = state.path_index || 0;
-
-      // 已走过
-      if (full.length > 1 && idx > 0) {
-        ctx.save();
-        ctx.shadowColor = "rgba(127,216,255,0.65)";
-        ctx.shadowBlur = 8;
-        ctx.strokeStyle = "rgba(127,216,255,0.95)";
-        ctx.lineWidth = 3;
-        ctx.lineJoin = "round";
-        ctx.beginPath();
-        for (var k = 0; k <= idx && k < full.length; k++) {
-          var vx = px(full[k][0]) + CELL / 2;
-          var vy = px(full[k][1]) + CELL / 2;
-          if (k === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
-        }
-        ctx.stroke();
-        ctx.restore();
+    // 已走过
+    if (plan.length > 1 && pathIndex > 0) {
+      ctx.save();
+      ctx.shadowColor = "rgba(127,216,255,0.65)";
+      ctx.shadowBlur = 8;
+      ctx.strokeStyle = "rgba(127,216,255,0.95)";
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      for (var k = 0; k <= pathIndex && k < plan.length; k++) {
+        var vx = px(plan[k][0]) + CELL / 2;
+        var vy = px(plan[k][1]) + CELL / 2;
+        if (k === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
       }
+      ctx.stroke();
+      ctx.restore();
+    }
 
-      // 待行进
-      if (full.length > idx + 1) {
-        ctx.save();
-        ctx.setLineDash([6, 6]);
-        ctx.shadowColor = "rgba(0,229,255,0.6)";
-        ctx.shadowBlur = 10;
-        ctx.strokeStyle = "rgba(0,229,255,0.85)";
-        ctx.lineWidth = 2;
+    // 待行进
+    if (plan.length > pathIndex + 1) {
+      ctx.save();
+      ctx.setLineDash([6, 6]);
+      ctx.shadowColor = "rgba(0,229,255,0.6)";
+      ctx.shadowBlur = 10;
+      ctx.strokeStyle = "rgba(0,229,255,0.85)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (var j = pathIndex; j < plan.length; j++) {
+        var nx = px(plan[j][0]) + CELL / 2;
+        var ny = px(plan[j][1]) + CELL / 2;
+        if (j === pathIndex) ctx.moveTo(nx, ny); else ctx.lineTo(nx, ny);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = "rgba(0,229,255,0.9)";
+      for (var d = pathIndex; d < plan.length; d++) {
         ctx.beginPath();
-        for (var j = idx; j < full.length; j++) {
-          var nx = px(full[j][0]) + CELL / 2;
-          var ny = px(full[j][1]) + CELL / 2;
-          if (j === idx) ctx.moveTo(nx, ny); else ctx.lineTo(nx, ny);
-        }
-        ctx.stroke();
-        ctx.restore();
-
-        ctx.fillStyle = "rgba(0,229,255,0.9)";
-        for (var d = idx; d < full.length; d++) {
-          ctx.beginPath();
-          ctx.arc(px(full[d][0]) + CELL / 2, px(full[d][1]) + CELL / 2, 2.2, 0, Math.PI * 2);
-          ctx.fill();
-        }
+        ctx.arc(px(plan[d][0]) + CELL / 2, px(plan[d][1]) + CELL / 2, 2.2, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
 
     // 巡检点
+    var target = sensor && sensor.target ? sensor.target : null;
     patrolPoints.forEach(function (p, n) {
       var cx = px(p[0]) + CELL / 2, cy = px(p[1]) + CELL / 2;
-      var isTarget = state && state.current_target &&
-        state.current_target[0] === p[0] && state.current_target[1] === p[1];
+      var isTarget = target && target[0] === p[0] && target[1] === p[1];
 
       ctx.beginPath();
       ctx.arc(cx, cy, 8, 0, Math.PI * 2);
@@ -440,87 +433,119 @@
     });
 
     // 机器人
-    if (state) {
-      var rx = px(state.x), ry = px(state.y);
+    if (robot) {
+      var rx = px(robot.x), ry = px(robot.y);
+      var cx2 = rx + CELL / 2, cy2 = ry + CELL / 2;
       ctx.save();
       ctx.shadowColor = "rgba(30,144,255,0.9)";
       ctx.shadowBlur = 16;
       ctx.fillStyle = "rgba(30,144,255,0.9)";
       ctx.beginPath();
-      var r = 6, cx2 = rx + CELL / 2, cy2 = ry + CELL / 2;
-      ctx.roundRect ? ctx.roundRect(cx2 - r, cy2 - r, r * 2, r * 2, 3) : ctx.rect(cx2 - r, cy2 - r, r * 2, r * 2);
+      var r = 6;
+      if (ctx.roundRect) ctx.roundRect(cx2 - r, cy2 - r, r * 2, r * 2, 3);
+      else ctx.rect(cx2 - r, cy2 - r, r * 2, r * 2);
       ctx.fill();
       ctx.restore();
+
+      var a = (robot.angle || 0) * Math.PI / 180;
       ctx.fillStyle = "#eaf7ff";
       ctx.beginPath();
       ctx.arc(cx2, cy2, 2.2, 0, Math.PI * 2);
       ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(cx2 + Math.cos(a) * 8, cy2 + Math.sin(a) * 8);
+      ctx.lineTo(cx2 + Math.cos(a + 2.5) * 5, cy2 + Math.sin(a + 2.5) * 5);
+      ctx.lineTo(cx2 + Math.cos(a - 2.5) * 5, cy2 + Math.sin(a - 2.5) * 5);
+      ctx.closePath();
+      ctx.fill();
     }
 
-    // 边框
     ctx.strokeStyle = "rgba(0,229,255,0.35)";
     ctx.lineWidth = 1;
     ctx.strokeRect(PAD - 0.5, PAD - 0.5, SIZE * CELL + 1, SIZE * CELL + 1);
   }
 
-  /* ---------- 状态渲染 ---------- */
+  /* ---------- 状态卡片 ---------- */
   function setCard(id, text, cls) {
     var card = document.getElementById(id);
     card.className = "card" + (cls ? " " + cls : "");
     document.getElementById("v" + id.slice(4)).innerHTML = text;
   }
 
-  function render() {
-    draw();
-    if (!state) return;
+  function renderCards() {
+    if (!robot) return;
 
-    document.getElementById("vPos").innerHTML = "(" + state.x + ", " + state.y + ")";
+    document.getElementById("vPos").innerHTML = "(" + robot.x + ", " + robot.y + ")";
+
+    var statusText = robot.status === "moving" ? "移动中" :
+                     robot.status === "finished" ? "已完成" : "空闲";
+    var statusNote = robot.status === "moving" ? "自动" :
+                     robot.status === "finished" ? "已到达" : "待命";
     document.getElementById("vState").innerHTML =
-      (state.patrolling || state.is_moving ? "巡检中" : "空闲") +
-      "<small>" + (state.patrolling ? "自动" : "待命") + "</small>";
+      statusText + "<small>" + statusNote + "</small>";
 
-    var sensorText = "正常";
-    var sensorCls = "ok";
-    if (state.has_collision) { sensorText = "碰撞"; sensorCls = "bad"; }
-    else if (state.is_out_bound) { sensorText = "越界"; sensorCls = "bad"; }
-    else if (state.task_abnormal) { sensorText = "异常"; sensorCls = "warn"; }
+    var sensorText = "正常", sensorCls = "ok";
+    if (sensor) {
+      if (sensor.collision) { sensorText = "碰撞"; sensorCls = "bad"; }
+      else if (sensor.out_of_bound) { sensorText = "越界"; sensorCls = "bad"; }
+      else if (sensor.front_blocked) { sensorText = "前方受阻"; sensorCls = "warn"; }
+      else if (sensor.left_blocked) { sensorText = "左侧受阻"; sensorCls = "warn"; }
+      else if (sensor.right_blocked) { sensorText = "右侧受阻"; sensorCls = "warn"; }
+    }
     setCard("cardSensor", sensorText, sensorCls);
 
     var alertText = "无", alertCls = "ok";
-    var last = state.alerts && state.alerts.length ? state.alerts[state.alerts.length - 1] : null;
-    if (last) {
-      alertCls = last.type === "out_bound" ? "warn" : "bad";
-      alertText = last.type === "collision" ? "碰撞告警" :
-                  last.type === "out_bound" ? "越界告警" : "规划失败";
+    if (lastAlert) {
+      alertCls = lastAlert.type === "out_bound" || lastAlert.type === "plan_failed" ? "warn" : "bad";
+      alertText = lastAlert.type === "collision" ? "碰撞告警" :
+                  lastAlert.type === "out_bound" ? "越界告警" : "任务提示";
     }
     setCard("cardAlert", alertText, alertCls);
 
-    var total = state.patrol_total || 0;
-    var done = state.patrol_finished || 0;
+    var pg = sensor && sensor.progress ? sensor.progress : { finished: 0, total: 0, remain: 0 };
     document.getElementById("vTask").innerHTML =
-      done + " / " + total + "<small>剩余 " + state.remain_steps + " 步</small>";
+      pg.finished + " / " + pg.total + "<small>剩余 " + pg.remain + " 步</small>";
     document.getElementById("vBar").style.width =
-      (total ? Math.round((done / total) * 100) : 0) + "%";
+      (pg.total ? Math.round((pg.finished / pg.total) * 100) : 0) + "%";
 
-    var moving = state.patrolling || state.is_moving;
-    var dot = document.getElementById("sysdot");
-    dot.className = "dot" + (moving ? " moving" : "");
+    var moving = robot.status === "moving";
+    document.getElementById("sysdot").className = "dot" + (moving ? " moving" : "");
     document.getElementById("systext").textContent = moving ? "机器人运行中" : "系统空闲";
+  }
 
-    (state.alerts || []).forEach(function (a) {
-      if (!seenAlerts[a.id]) {
-        seenAlerts[a.id] = true;
-        toast(a.type, a.msg);
+  function render() {
+    draw();
+    renderCards();
+  }
+
+  /* ---------- 进度同步 ---------- */
+  function syncIndex() {
+    if (!plan.length || !robot) return;
+    for (var i = pathIndex; i < plan.length; i++) {
+      if (plan[i][0] === robot.x && plan[i][1] === robot.y) {
+        pathIndex = i;
+        return;
       }
-    });
+    }
   }
 
   /* ---------- 轮询 ---------- */
   function poll() {
     if (polling) return;
     polling = true;
-    api("/api/status")
-      .then(function (d) { state = d; render(); })
+    Promise.all([api("/api/robot"), api("/api/sensor")])
+      .then(function (res) {
+        robot = res[0].data;
+        sensor = res[1].data;
+        syncIndex();
+
+        if (sensor.out_of_bound && !prevOut) toast("out_bound", "机器人已越出地图边界");
+        if (sensor.collision && !prevCollision) toast("collision", "机器人当前位置与障碍物重合");
+        prevOut = !!sensor.out_of_bound;
+        prevCollision = !!sensor.collision;
+
+        render();
+      })
       .catch(function () {
         document.getElementById("systext").textContent = "后端连接中断";
         document.getElementById("sysdot").className = "dot moving";
@@ -531,7 +556,14 @@
   /* ---------- 交互 ---------- */
   function move(direction) {
     api("/api/move", { method: "POST", body: JSON.stringify({ direction: direction }) })
-      .catch(function () { toast("plan_failed", "无法连接后端", "conn"); });
+      .then(function (res) {
+        if (!res.data.ok) {
+          toast(res.data.msg && res.data.msg.indexOf("障碍") >= 0 ? "collision" : "out_bound",
+                res.data.msg || "移动被阻止");
+        }
+        poll();
+      })
+      .catch(function () { toast("plan_failed", "无法连接后端"); });
   }
 
   Array.prototype.forEach.call(document.querySelectorAll(".dpad button"), function (b) {
@@ -539,19 +571,16 @@
   });
 
   window.addEventListener("keydown", function (e) {
-    var map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
-    if (map[e.key]) { e.preventDefault(); move(map[e.key]); }
+    var map2 = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+    if (map2[e.key]) { e.preventDefault(); move(map2[e.key]); }
   });
 
-  Array.prototype.forEach.call(document.querySelectorAll("#speed button"), function (b) {
-    b.onclick = function () {
-      speed = parseFloat(b.dataset.speed);
-      Array.prototype.forEach.call(document.querySelectorAll("#speed button"), function (x) {
-        x.classList.remove("on");
-      });
-      b.classList.add("on");
-    };
-  });
+  var slider = document.getElementById("speed");
+  slider.oninput = function () {
+    speedIdx = parseInt(slider.value, 10);
+    speed = SPEEDS[speedIdx];
+    document.getElementById("speedNow").textContent = speed + "x";
+  };
 
   function canvasPos(evt) {
     var rect = canvas.getBoundingClientRect();
@@ -564,6 +593,7 @@
   canvas.addEventListener("click", function (evt) {
     var p = canvasPos(evt);
     if (p.cx < 0 || p.cy < 0 || p.cx >= SIZE || p.cy >= SIZE) return;
+
     var hit = -1;
     for (var i = 0; i < patrolPoints.length; i++) {
       if (patrolPoints[i][0] === p.cx && patrolPoints[i][1] === p.cy) { hit = i; break; }
@@ -572,9 +602,10 @@
       patrolPoints.splice(hit, 1);
     } else {
       var blocked = obstacles.some(function (o) { return o[0] === p.cx && o[1] === p.cy; });
-      if (blocked) { toast("plan_failed", "该格为障碍物，不能设置巡检点", "block_" + p.cx + "_" + p.cy); return; }
-      if (patrolPoints.length >= (map.max_patrol_points || 6)) {
-        toast("plan_failed", "巡检点最多 " + (map.max_patrol_points || 6) + " 个", "maxpts");
+      if (blocked) { toast("plan_failed", "该格为障碍物，不能设置巡检点"); return; }
+      var maxPts = map.max_patrol_points || 6;
+      if (patrolPoints.length >= maxPts) {
+        toast("plan_failed", "巡检点最多 " + maxPts + " 个");
         return;
       }
       patrolPoints.push([p.cx, p.cy]);
@@ -584,46 +615,43 @@
 
   document.getElementById("btnStart").onclick = function () {
     if (!patrolPoints.length) {
-      toast("plan_failed", "请先在地图上点击添加巡检点", "empty");
+      toast("plan_failed", "请先在地图上点击添加巡检点");
       return;
     }
-    api("/api/start_patrol", {
+    api("/api/patrol", {
       method: "POST",
-      body: JSON.stringify({ patrol_points: patrolPoints, speed_multiplier: speed })
-    }).then(function (r) {
-      if (!r.ok) toast(r.alert || "plan_failed", r.msg || "启动失败");
-    }).catch(function () {
-      toast("plan_failed", "无法连接后端", "conn");
-    });
+      body: JSON.stringify({ points: patrolPoints, speed: speed })
+    }).then(function (res) {
+      if (!res.data.ok) { toast("plan_failed", res.data.msg || "启动失败"); return; }
+      plan = res.data.plan || [];
+      pathIndex = 0;
+      if (res.data.msg) toast("plan_failed", res.data.msg);
+      poll();
+    }).catch(function () { toast("plan_failed", "无法连接后端"); });
   };
 
   document.getElementById("btnStop").onclick = function () {
-    api("/api/stop", { method: "POST" }).catch(function () {});
+    api("/api/stop", { method: "POST" }).then(function () { poll(); }).catch(function () {});
   };
 
   document.getElementById("btnClear").onclick = function () {
     patrolPoints = [];
+    plan = [];
+    pathIndex = 0;
     render();
   };
 
-  document.getElementById("btnReset").onclick = function () {
-    patrolPoints = [];
-    seenAlerts = {};
-    api("/api/reset", { method: "POST" }).catch(function () {});
-  };
-
   /* ---------- 启动 ---------- */
-  api("/api/map").then(function (m) {
-    map = m;
-    obstacles = m.obstacles || [];
-    patrolPoints = (m.patrol_points || []).slice(0, m.max_patrol_points || 6);
+  api("/api/map").then(function (res) {
+    map = res.data;
+    obstacles = map.obstacles || [];
     render();
   }).catch(function () {
     render();
   });
 
   poll();
-  setInterval(poll, 180);
+  setInterval(poll, 1000);
 })();
 </script>
 </body>

@@ -1,106 +1,119 @@
-> **在线演示：** _（部署完成后把实际访问地址填在这里，例如 https://patrol-sim.onrender.com；未部署则写"本地运行，见下方快速开始"）_
+> **在线演示：** 本地运行，见下方「快速开始」（未部署公有云，不虚构演示地址）
 
 # 智能巡检机器人二维仿真系统
 
-一个可以在浏览器里操作的巡检场景：一张 20×20 的二维地图，你可以手动开动机器人，也可以点选巡检点让它按 BFS 规划出的最短路径自动巡检，过程中虚拟传感器持续检测碰撞与越界并弹出告警。
+在浏览器里操作的巡检场景：20×20 二维地图，可手动开动机器人，也可点选巡检点让它按 BFS 规划出的最短路径自动巡检，虚拟传感器持续探测并弹出碰撞、越界告警。
 
-纯软件仿真，不需要实体机器人、GPU 或付费大模型 API。后端 Flask，前端单文件 HTML Canvas，一条 `docker compose` 命令即可完整启动。
+纯软件仿真，不需要实体机器人、GPU 或付费大模型 API。
 
-## 功能
+## 技术选型
 
-**标准版**
-
-- Web 交互界面 + Flask 后端 API
-- 20×20 二维网格地图，障碍物、机器人实时渲染
-- 机器人手动控制（方向键 / 屏幕按钮），状态实时反馈
-- BFS 路径规划 + 自动巡检任务
-- 虚拟传感器：碰撞检测、越界检测、异常告警
-
-**拓展功能**
-
-- 深色科技控制台 HUD 界面：发光边框、半透明面板、HUD 角线、状态指示灯
-- 路径轨迹可视化：待行进路径青色虚线 + 圆点，已走过路径浅蓝色实线
-- 巡检点标记 P1/P2/P3，当前目标点黄色高亮
-- 仿真速度四档调节：0.5x / 1x / 2x / 4x
-- 碰撞、越界、路径规划失败三类半透明告警弹窗，可关闭
-- 鼠标点击画布直接添加 / 移除巡检点
-- 巡检进度展示：已完成点位 / 总点位、剩余步数
-
-> 依策划书要求，本项目不实现日志面板。
+| 项 | 选型 |
+|---|---|
+| 前端 | 原生 HTML / CSS / JavaScript，单文件，无构建步骤 |
+| 后端 | Python Flask，六个 REST 接口 |
+| 绘图 | Canvas 2D，DPR 适配 |
+| 仿真 | 纯 Python 标准库：机器人运动、BFS 寻路、虚拟传感器 |
+| CI | GitHub Actions，`compileall` + `pytest` |
+| Docker | Dockerfile + docker compose，一条命令启动 |
 
 ## 快速开始
-
-### Docker（推荐）
-
-```bash
-docker compose -f docker/docker-compose.yml up --build
-```
-
-打开 <http://localhost:5050>
 
 ### 本地运行
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 python backend/app.py
 ```
 
-打开 <http://localhost:5050>。端口用环境变量 `PORT` 覆盖，例如 `PORT=8000 python backend/app.py`。
+打开 <http://localhost:5050>。端口可用环境变量覆盖：`PORT=8000 python backend/app.py`。
 
-## 怎么玩
+### Docker
 
-1. 点左侧方向键（或键盘 ↑↓←→）手动移动机器人；撞向障碍物或走出边界会弹告警。
-2. 在地图画布上点击任意空格添加巡检点（再点一次移除），最多 6 个。
-3. 选好速度档位，点「启动自动巡检」，机器人会按 BFS 规划路径依次走完所有点位。
-4. 底部卡片实时显示坐标、运动状态、传感器状态、告警与巡检进度。
-5. 「停止任务」立即中断巡检，「复位系统」清空点位与轨迹并让机器人回到起点。
+```bash
+docker compose up --build
+```
+
+打开 <http://localhost:5050>。
+
+## 功能
+
+**标准版**
+
+- Web 交互界面 + Flask 后端 API（六个接口）
+- 20×20 网格地图，障碍物、机器人实时渲染
+- 手动控制（方向键 / 屏幕按钮 / 键盘），越界与撞障被拦截并说明原因
+- BFS 路径规划 + 自动巡检
+- 虚拟传感器：前 / 左 / 右探测、碰撞检测、越界检测
+
+**拓展功能**
+
+- 科技 HUD 控制台：深色底、发光边框、HUD 角线、状态指示灯
+- 路径轨迹：待走路径青色虚线 + 圆点，已走路径浅蓝实线
+- 巡检点标记 P1/P2/P3，当前目标点黄色高亮
+- 仿真速度滑块 0.5x / 1x / 2x / 4x
+- 碰撞、越界、不可达三类告警弹窗，可关闭
+- 点击地图添加 / 移除巡检点
+- 巡检进度：已完成 / 总点位、剩余步数
+
+> 依策划书要求，本项目不实现日志面板。
 
 ## 项目结构
 
 ```
-patrol-sim-std/
-├─ frontend/              # 单文件 HUD 前端（index.html）
-├─ backend/               # Flask 网关 app.py + 模块缺失时的兜底 fallback.py
-├─ module_embed_sim/      # 机器人运动仿真
-├─ module_ai_sensor/      # 虚拟传感器
-├─ module_algorithm/      # BFS 路径规划与巡检调度
-├─ docker/                # Dockerfile 与 docker-compose.yml
-├─ docs/                  # 接口契约、架构、运行说明、分工
-├─ tests/                 # pytest 接口测试
-└─ .github/workflows/     # CI
+patrol-sim/
+├─ frontend/
+│  ├─ index.html          # 科技 HUD 单页，Canvas 渲染与按钮交互
+│  ├─ README.md
+│  └─ AGENTS.md
+├─ backend/
+│  ├─ app.py              # Flask 入口，六个 API + 托管前端
+│  ├─ sim/
+│  │  ├─ __init__.py
+│  │  ├─ robot_sim.py     # 嵌入式仿真：坐标 / 朝向 / 行进
+│  │  ├─ path_planner.py  # 算法：BFS + 多点串联
+│  │  └─ sensor_sim.py    # 人工智能：虚拟传感器
+│  ├─ tests/test_sim.py   # CI 运行的测试
+│  ├─ requirements.txt
+│  ├─ README.md
+│  └─ AGENTS.md
+├─ docs/                  # 01~04 四份文档
+├─ .github/workflows/ci.yml
+├─ Dockerfile
+├─ docker-compose.yml
+├─ README.md
+├─ AGENTS.md
+└─ .gitignore
 ```
 
 ## 接口一览
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/map` | 地图尺寸、障碍物、预设巡检点 |
-| POST | `/api/move` | 手动移动一格，`{"direction": "up/down/left/right"}` |
-| POST | `/api/start_patrol` | 启动巡检，`{"patrol_points": [[x,y]], "speed_multiplier": 1}` |
-| GET | `/api/status` | 机器人状态、传感器、进度、路径、轨迹、告警 |
-| POST | `/api/stop` | 停止运动 |
-| POST | `/api/reset` | 清空任务、轨迹与告警，机器人回起点 |
+| GET | `/api/map` | 地图尺寸、障碍物、起点、巡检点上限 |
+| GET | `/api/robot` | 机器人 x / y / angle / status |
+| POST | `/api/move` | 手动移动一格，失败返回 409 + 原因 |
+| POST | `/api/patrol` | 启动巡检，返回完整路径 |
+| POST | `/api/stop` | 停止巡检 |
+| GET | `/api/sensor` | 传感器读数 + 巡检进度 |
 
-完整字段定义见 [docs/api_spec.md](docs/api_spec.md)。
+完整字段见 [docs/03_项目架构与接口.md](docs/03_项目架构与接口.md)。
 
 ## 开发与测试
 
 ```bash
-pytest -q
+pytest backend/tests -q
 ```
 
-CI 在每次 push 与 PR 时自动运行测试（`.github/workflows/ci.yml`）。
+CI 在每次 push 与 PR 时自动运行编译检查与测试（`.github/workflows/ci.yml`）。
 
-## 文档
+## 文档索引
 
-- [接口契约](docs/api_spec.md)
-- [系统架构](docs/architecture.md)
-- [运行说明](docs/runbook.md)
-- [小组分工](docs/team-work.md)
-
-## 技术说明
-
-- 三个业务模块（仿真 / 传感器 / 算法）函数签名严格遵循接口契约，各模块负责人可直接替换同名文件，接口不变。传感器模块已由人工智能组交付，仿真与算法当前为参考实现。
-- 任一模块缺失或导入失败时，后端会自动使用内置兜底实现，保证基础版可独立运行。
+- [01 项目需求](docs/01_项目需求.md)
+- [02 小组分工](docs/02_小组分工.md)
+- [03 项目架构与接口](docs/03_项目架构与接口.md)
+- [04 运行与结业提交](docs/04_运行与结业提交.md)
+- [后端说明](backend/README.md)
+- [前端说明](frontend/README.md)

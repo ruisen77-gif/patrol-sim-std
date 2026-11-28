@@ -1,315 +1,116 @@
 # -*- coding: utf-8 -*-
-"""Flask 网关：对外提供 HTTP 接口，对内调用仿真、传感器、算法三个模块。"""
+"""Flask 网关：对外暴露六个接口，对内只做编排。
+
+接口：
+    GET  /api/map      地图尺寸、障碍物、起点与巡检点上限
+    GET  /api/robot    机器人状态 x / y / angle / status
+    POST /api/move     手动移动，失败返回 409 与原因
+    POST /api/patrol   启动巡检，返回完整路径
+    POST /api/stop     停止巡检
+    GET  /api/sensor   传感器读数 + 巡检进度
+"""
 
 import os
 import sys
 import threading
-import time
 
 from flask import Flask, jsonify, request, send_from_directory
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(BACKEND_DIR)
 FRONTEND_DIR = os.path.join(ROOT, "frontend")
-for _sub in ("module_embed_sim", "module_ai_sensor", "module_algorithm"):
-    _path = os.path.join(ROOT, _sub)
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from sim import path_planner, robot_sim, sensor_sim  # noqa: E402
 
 MAP_SIZE = 20
 MAX_PATROL_POINTS = 6
-
-try:
-    import robot_sim as _robot
-except Exception:
-    _robot = None
-
-try:
-    import sensor_sim as _sensor
-except Exception:
-    _sensor = None
-
-try:
-    import path_planner as _planner
-except Exception:
-    _planner = None
-
-if _robot is None or _sensor is None or _planner is None:
-    from fallback import MockPlanner, MockRobot, MockSensor
-
-    _robot = _robot or MockRobot()
-    _sensor = _sensor or MockSensor()
-    _planner = _planner or MockPlanner()
+START = [0, 0]
 
 
 def _build_obstacles():
-    obstacles = []
-    for y in range(2, 15):
-        if y != 8:
-            obstacles.append([6, y])
-    for x in range(10, 19):
-        if x != 14:
-            obstacles.append([10, x])
-    for x in (2, 3, 4):
-        for y in (16, 17):
-            obstacles.append([x, y])
-    obstacles.extend([[15, 12], [16, 12], [15, 13]])
+    obstacles = [[6, y] for y in range(2, 9)]
+    obstacles += [[x, 10] for x in range(10, 15)]
+    obstacles += [[16, 4], [16, 5], [16, 6]]
     return obstacles
 
 
 OBSTACLES = _build_obstacles()
-PRESET_POINTS = [[3, 4], [15, 5], [15, 16], [4, 13]]
-DIRECTIONS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
+robot_sim.set_map(OBSTACLES, MAP_SIZE)
 
 
-class SimEngine(object):
+def _blocked_set():
+    return {(o[0], o[1]) for o in OBSTACLES}
+
+
+class PatrolTracker(object):
+    """记录本次巡检计划，按机器人位置推算进度。"""
+
     def __init__(self):
-        self.lock = threading.RLock()
+        self.lock = threading.Lock()
+        self.plan = []
+        self.points = []
+        self.cursor = 0
         self.speed = 1.0
-        self.full_path = []
-        self.path_index = 0
-        self.trajectory = []
-        self.patrol_points = []
-        self.patrolling = False
-        self.alerts = []
-        self.alert_seq = 0
-        self._worker = None
-        self._stop_event = threading.Event()
 
-    # ---------- 告警 ----------
-    def push_alert(self, kind, message):
+    def start(self, plan, points, speed):
         with self.lock:
-            self.alert_seq += 1
-            self.alerts.append({
-                "id": self.alert_seq,
-                "type": kind,
-                "msg": message,
-                "ts": round(time.time(), 3),
-            })
-            if len(self.alerts) > 20:
-                self.alerts = self.alerts[-20:]
-            return self.alert_seq
-
-    # ---------- 进度 ----------
-    def _sync_progress_locked(self):
-        state = _robot.get_robot_state()
-        pos = [int(state.get("x", 0)), int(state.get("y", 0))]
-        if not self.full_path:
-            if not self.trajectory or self.trajectory[-1] != pos:
-                self.trajectory.append(pos)
-            return
-
-        found = None
-        for i in range(self.path_index, len(self.full_path)):
-            if self.full_path[i] == pos:
-                found = i
-                break
-        if found is None:
-            for i in range(len(self.full_path)):
-                if self.full_path[i] == pos:
-                    found = i
-                    break
-        if found is not None and found >= self.path_index:
-            self.path_index = found
-        self.trajectory = [list(p) for p in self.full_path[: self.path_index + 1]]
-
-    def _progress_locked(self):
-        total = len(self.patrol_points)
-        if not self.full_path:
-            return total, 0, 0, None
-
-        finished = 0
-        target = None
-        for point in self.patrol_points:
-            index = None
-            for i in range(len(self.full_path) - 1, -1, -1):
-                if self.full_path[i] == point:
-                    index = i
-                    break
-            if index is None:
-                continue
-            if index <= self.path_index:
-                finished += 1
-            elif target is None:
-                target = list(point)
-        remain = max(0, len(self.full_path) - 1 - self.path_index)
-        return total, finished, remain, target
-
-    # ---------- 手动 ----------
-    def move(self, direction):
-        if direction not in DIRECTIONS:
-            return {"ok": False, "msg": "方向必须是 up/down/left/right"}
-        with self.lock:
-            if self.patrolling:
-                self._stop_patrol_locked()
-            state = _robot.get_robot_state()
-            dx, dy = DIRECTIONS[direction]
-            tx, ty = int(state["x"]) + dx, int(state["y"]) + dy
-
-            if (tx, ty) in {(o[0], o[1]) for o in OBSTACLES}:
-                self.push_alert("collision", "前方 (%d, %d) 存在障碍物，无法前进" % (tx, ty))
-                return {"ok": False, "alert": "collision", "msg": "碰撞：前方有障碍物"}
-            if not (0 <= tx < MAP_SIZE and 0 <= ty < MAP_SIZE):
-                self.push_alert("out_bound", "目标坐标 (%d, %d) 越出地图边界" % (tx, ty))
-                return {"ok": False, "alert": "out_bound", "msg": "越界：不能走出地图"}
-
-            _robot.move_command(direction)
-            self._sync_progress_locked()
-            return {"ok": True, "msg": "移动成功"}
-
-    # ---------- 巡检 ----------
-    def start_patrol(self, points, speed_multiplier):
-        clean = []
-        for item in points or []:
-            try:
-                x, y = int(item[0]), int(item[1])
-            except (TypeError, ValueError, IndexError):
-                return {"ok": False, "alert": "plan_failed", "msg": "巡检点坐标格式错误"}
-            if not (0 <= x < MAP_SIZE and 0 <= y < MAP_SIZE):
-                return {"ok": False, "alert": "plan_failed", "msg": "巡检点 (%d, %d) 越界" % (x, y)}
-            if (x, y) in {(o[0], o[1]) for o in OBSTACLES}:
-                return {"ok": False, "alert": "plan_failed", "msg": "巡检点 (%d, %d) 位于障碍物上" % (x, y)}
-            if [x, y] not in clean:
-                clean.append([x, y])
-        if not clean:
-            return {"ok": False, "alert": "plan_failed", "msg": "请先在地图上添加巡检点"}
-        if len(clean) > MAX_PATROL_POINTS:
-            return {"ok": False, "alert": "plan_failed", "msg": "巡检点最多 %d 个" % MAX_PATROL_POINTS}
-
-        try:
-            speed = float(speed_multiplier)
-        except (TypeError, ValueError):
-            speed = 1.0
-        if speed <= 0:
-            speed = 1.0
-
-        with self.lock:
-            self._stop_patrol_locked()
-            state = _robot.get_robot_state()
-            start = [int(state["x"]), int(state["y"])]
-            route = [start] + clean
-            path = _planner.patrol_task(MAP_SIZE, OBSTACLES, route)
-            path = [[int(p[0]), int(p[1])] for p in (path or [])]
-
-            if len(path) < 2:
-                self.push_alert("plan_failed", "巡检点均不可达，路径规划失败")
-                return {"ok": False, "alert": "plan_failed", "msg": "路径规划失败：没有可达的巡检点"}
-
-            self.full_path = path
-            self.path_index = 0
-            self.trajectory = [path[0]]
-            self.patrol_points = clean
+            self.plan = [list(p) for p in plan]
+            self.points = [list(p) for p in points]
+            self.cursor = 0
             self.speed = speed
-            self.patrolling = True
-            self._stop_event = threading.Event()
 
-            self._worker = threading.Thread(
-                target=self._patrol_worker,
-                args=(path, speed, self._stop_event),
-                daemon=True,
-            )
-            self._worker.start()
-        return {"ok": True, "msg": "巡检已启动", "path_length": len(path)}
-
-    def _follow(self, path, speed):
-        try:
-            _robot.follow_path(path, speed)
-        except Exception as exc:  # 模块异常不应拖垮后端
-            self.push_alert("plan_failed", "巡检执行异常：%s" % exc)
-
-    def _patrol_worker(self, path, speed, stop_event):
-        inner = threading.Thread(target=self._follow, args=(path, speed), daemon=True)
-        inner.start()
-        try:
-            while inner.is_alive() and not stop_event.is_set():
-                with self.lock:
-                    self._sync_progress_locked()
-                self._check_sensor()
-                time.sleep(0.02)
-        finally:
-            if stop_event.is_set():
-                _robot.stop_move()
-            inner.join(timeout=1.0)
-            with self.lock:
-                self._sync_progress_locked()
-                self.patrolling = False
-
-    def _check_sensor(self):
-        state = _robot.get_robot_state()
-        result = _sensor.sensor_detect(state, OBSTACLES)
-        if result.get("has_collision"):
-            with self.lock:
-                if not self.alerts or self.alerts[-1]["type"] != "collision":
-                    self.push_alert("collision", "传感器检测到碰撞")
-        elif result.get("is_out_bound"):
-            with self.lock:
-                if not self.alerts or self.alerts[-1]["type"] != "out_bound":
-                    self.push_alert("out_bound", "传感器检测到越界")
-
-    def _stop_patrol_locked(self):
-        if self.patrolling:
-            self._stop_event.set()
-            _robot.stop_move()
-            self.patrolling = False
-
-    def stop(self):
+    def clear(self):
         with self.lock:
-            self._stop_patrol_locked()
-            _robot.stop_move()
-        return {"ok": True, "msg": "已停止"}
+            self.plan = []
+            self.points = []
+            self.cursor = 0
 
-    def reset(self):
+    def sync(self, x, y):
         with self.lock:
-            self._stop_patrol_locked()
-            _robot.stop_move()
-        time.sleep(0.05)
-        try:
-            _robot.follow_path([[0, 0]], 4)
-        except Exception:
-            pass
-        with self.lock:
-            self.full_path = []
-            self.path_index = 0
-            self.trajectory = []
-            self.patrol_points = []
-            self.alerts = []
-            self.alert_seq = 0
-            self.patrolling = False
-        return {"ok": True, "msg": "已复位"}
+            pos = [int(x), int(y)]
+            for i in range(self.cursor, len(self.plan)):
+                if self.plan[i] == pos:
+                    self.cursor = i
+                    break
 
-    # ---------- 状态 ----------
-    def status(self):
+    @staticmethod
+    def _last_index(plan, point):
+        for i in range(len(plan) - 1, -1, -1):
+            if plan[i] == point:
+                return i
+        return None
+
+    def snapshot(self):
         with self.lock:
-            self._sync_progress_locked()
-            state = _robot.get_robot_state()
-            sensor = _sensor.sensor_detect(state, OBSTACLES)
-            total, finished, remain, target = self._progress_locked()
+            plan = [list(p) for p in self.plan]
+            total = len(self.points)
+            finished = 0
+            target = None
+            for point in self.points:
+                index = self._last_index(plan, point)
+                if index is None:
+                    continue
+                if index <= self.cursor:
+                    finished += 1
+                elif target is None:
+                    target = list(point)
             return {
-                "x": int(state.get("x", 0)),
-                "y": int(state.get("y", 0)),
-                "angle": 0,
-                "is_moving": bool(state.get("is_moving", False)),
-                "task_status": state.get("task_status", "idle"),
-                "sensor_distance": sensor.get("sensor_distance", [0, 0, 0, 0]),
-                "has_collision": bool(sensor.get("has_collision", False)),
-                "is_out_bound": bool(sensor.get("is_out_bound", False)),
-                "task_abnormal": bool(sensor.get("task_abnormal", False)),
-                "patrol_total": total,
-                "patrol_finished": finished,
-                "remain_steps": remain,
-                "current_target": target,
-                "full_path": [list(p) for p in self.full_path],
-                "path_index": self.path_index,
-                "trajectory": [list(p) for p in self.trajectory],
-                "patrolling": self.patrolling,
+                "plan": plan,
+                "path_index": self.cursor,
+                "total": total,
+                "finished": finished,
+                "remain": max(0, len(plan) - 1 - self.cursor),
+                "target": target,
                 "speed": self.speed,
-                "alerts": list(self.alerts[-8:]),
             }
 
 
 def create_app():
-    app = Flask(__name__, static_folder=None)
-    engine = SimEngine()
-    app.config["ENGINE"] = engine
+    app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
+    app.config["ENGINE"] = PatrolTracker()
+    tracker = app.config["ENGINE"]
 
     @app.after_request
     def add_cors(response):
@@ -328,39 +129,89 @@ def create_app():
         return jsonify({
             "size": MAP_SIZE,
             "obstacles": OBSTACLES,
-            "patrol_points": PRESET_POINTS,
+            "start": START,
             "max_patrol_points": MAX_PATROL_POINTS,
-            "start": [0, 0],
         })
+
+    @app.route("/api/robot", methods=["GET"])
+    def api_robot():
+        state = robot_sim.get_state()
+        tracker.sync(state["x"], state["y"])
+        return jsonify(state)
 
     @app.route("/api/move", methods=["POST"])
     def api_move():
         data = request.get_json(silent=True) or {}
-        return jsonify(engine.move(str(data.get("direction", ""))))
+        result = robot_sim.move(str(data.get("direction", "")))
+        code = 200 if result.get("ok") else 409
+        return jsonify(result), code
 
-    @app.route("/api/start_patrol", methods=["POST"])
-    def api_start_patrol():
+    @app.route("/api/patrol", methods=["POST"])
+    def api_patrol():
         data = request.get_json(silent=True) or {}
-        return jsonify(engine.start_patrol(
-            data.get("patrol_points"),
-            data.get("speed_multiplier", 1),
-        ))
+        points = data.get("points") or []
+        speed = data.get("speed", 1)
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            speed = 1.0
+        if speed <= 0:
+            speed = 1.0
 
-    @app.route("/api/status", methods=["GET"])
-    def api_status():
-        return jsonify(engine.status())
+        clean = []
+        try:
+            for item in points:
+                x, y = int(item[0]), int(item[1])
+                if not (0 <= x < MAP_SIZE and 0 <= y < MAP_SIZE):
+                    return jsonify({"ok": False, "msg": "巡检点 (%d, %d) 越界" % (x, y)}), 409
+                if (x, y) in _blocked_set():
+                    return jsonify({"ok": False, "msg": "巡检点 (%d, %d) 位于障碍物上" % (x, y)}), 409
+                if [x, y] not in clean:
+                    clean.append([x, y])
+        except (TypeError, ValueError, IndexError):
+            return jsonify({"ok": False, "msg": "巡检点格式应为 [[x, y], ...]"}), 409
+
+        if not clean:
+            return jsonify({"ok": False, "msg": "请先在地图上点击设置巡检点"}), 409
+        if len(clean) > MAX_PATROL_POINTS:
+            return jsonify({"ok": False, "msg": "巡检点最多 %d 个" % MAX_PATROL_POINTS}), 409
+
+        state = robot_sim.get_state()
+        route = [[state["x"], state["y"]]] + clean
+        raw = path_planner.patrol(MAP_SIZE, OBSTACLES, route)
+        unreachable = getattr(raw, "unreachable_points", [])
+        plan = [[int(p[0]), int(p[1])] for p in raw]
+
+        if len(plan) < 2:
+            return jsonify({"ok": False, "msg": "目标点不可达"}), 409
+
+        tracker.start(plan, clean, speed)
+        robot_sim.follow(plan, speed)
+
+        msg = ""
+        if unreachable:
+            msg = "部分点位不可达，已跳过：%s" % unreachable
+        return jsonify({"ok": True, "plan": plan, "unreachable": unreachable, "msg": msg})
 
     @app.route("/api/stop", methods=["POST"])
     def api_stop():
-        return jsonify(engine.stop())
+        robot_sim.stop()
+        return jsonify({"ok": True, "status": robot_sim.get_state()["status"]})
 
-    @app.route("/api/reset", methods=["POST"])
-    def api_reset():
-        return jsonify(engine.reset())
-
-    @app.route("/api/health", methods=["GET"])
-    def api_health():
-        return jsonify({"ok": True})
+    @app.route("/api/sensor", methods=["GET"])
+    def api_sensor():
+        state = robot_sim.get_state()
+        tracker.sync(state["x"], state["y"])
+        data = sensor_sim.detect(state, OBSTACLES, MAP_SIZE)
+        snap = tracker.snapshot()
+        data["progress"] = {
+            "finished": snap["finished"],
+            "total": snap["total"],
+            "remain": snap["remain"],
+        }
+        data["target"] = snap["target"]
+        data["status"] = state["status"]
+        return jsonify(data)
 
     return app
 
