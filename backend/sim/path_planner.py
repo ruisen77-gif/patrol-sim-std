@@ -20,26 +20,39 @@ sim/path_planner.py —— 智能巡检机器人二维仿真系统 · 算法模�
         失败：{"ok": False, "path": [],           "msg": "无法找到路径"}
         起点与终点重合时返回只含一个点的路径。
 
-    patrol(size, obstacles, points) -> dict
-        {"ok": bool,
-         "path": [[x,y], ...],                # 串联后的完整巡检路径
-         "unreachable_points": [[x,y], ...],  # 被跳过的不可达巡检点
-         "msg": str}                          # 说明文字，无异常时为空串
+    patrol(size, obstacles, points) -> PatrolPath
+        list 子类，list 本体为串联后的完整路径 [[x,y], ...]（含起点与终点）；
+        额外携带 unreachable_points（被跳过的不可达巡检点）与 msg（说明文字）。
         按顺序对相邻两个巡检点调用 bfs，各段路径去掉首点后依次拼接；
         某段失败则跳过该巡检点并记入 unreachable_points，msg 中说明。
 
 【供全栈同学（app.py）接入的写法】
-    result = path_planner.patrol(size, obstacles, points)
-    if not result["ok"]:
+    path = path_planner.patrol(size, obstacles, points)   # 直接当 list 用
+    if len(path) < 2:
         return {"ok": False, "msg": "目标点不可达"}, 409
-    robot_sim.follow(result["path"], speed)
-    return {"ok": True, "plan": result["path"]}
+    robot_sim.follow(path, speed)
+    return {"ok": True, "plan": path, "unreachable": path.unreachable_points, "msg": path.msg}
 """
 
 from collections import deque
 
 # 四方向移动：右、下、左、上（保证 BFS 结果确定、可复现）
 _DIRECTIONS = ((1, 0), (0, 1), (-1, 0), (0, -1))
+
+
+class PatrolPath(list):
+    """patrol() 的返回类型：完整巡检路径（list 子类，按 docs/03 契约）。
+
+    list 本体就是 [[x, y], ...] 路径点序列，可直接遍历、取 len、切片；
+    额外携带两个属性：
+        unreachable_points  被跳过的不可达巡检点，如 [[5, 5]]
+        msg                 说明文字，无异常时为空串
+    """
+
+    def __init__(self, points=None, unreachable_points=None, msg=""):
+        super(PatrolPath, self).__init__(points or [])
+        self.unreachable_points = [list(p) for p in (unreachable_points or [])]
+        self.msg = msg
 
 
 def _in_bounds(x, y, size):
@@ -144,31 +157,26 @@ def patrol(size, obstacles, points):
         obstacles : 障碍物坐标列表
         points    : 巡检点列表，如 [[2,2],[15,3],[18,18]]
 
-    返回（dict）：
-        {"ok": bool,
-         "path": [[x,y], ...],                # 串联后的完整路径
-         "unreachable_points": [[x,y], ...],  # 被跳过的巡检点
-         "msg": str}                          # 说明文字，无异常时为空串
+    返回（PatrolPath，list 子类）：
+        list 本体即 [[x,y], ...] 完整路径（含起点与终点），可直接遍历 / len / 切片；
+        .unreachable_points  [[x,y], ...]，被跳过的不可达巡检点
+        .msg                 说明文字，无异常时为空串
 
     示例（6×6 地图，x=3 一列竖墙，底部留缺口）：
-        patrol(6, [[3,0],[3,1],[3,2],[3,3],[3,4]], [[0,0],[5,0]])
-        -> {"ok": True, "path": [[0,0],[1,0],[2,0],[2,1],...,[5,0]],
-            "unreachable_points": [], "msg": ""}
+        r = patrol(6, [[3,0],[3,1],[3,2],[3,3],[3,4]], [[0,0],[5,0]])
+        r -> [[0,0],[1,0],[2,0],[2,1],...,[5,0]]
+        r.unreachable_points -> []，r.msg -> ""
     """
-    result = {"ok": False, "path": [], "unreachable_points": [], "msg": ""}
-
     if not points:
-        result["msg"] = "未提供巡检点"
-        return result
+        return PatrolPath([], [], "未提供巡检点")
 
     blocked = _normalize_obstacles(obstacles, size)
 
     # 第一个巡检点是整条巡检的起点，必须本身可达
     ax, ay = int(points[0][0]), int(points[0][1])
     if not _in_bounds(ax, ay, size) or (ax, ay) in blocked:
-        result["unreachable_points"] = [[int(p[0]), int(p[1])] for p in points]
-        result["msg"] = "起点巡检点不可达，全部巡检点已跳过"
-        return result
+        skipped_all = [[int(p[0]), int(p[1])] for p in points]
+        return PatrolPath([], skipped_all, "起点巡检点不可达，全部巡检点已跳过")
 
     full_path = [[ax, ay]]
     skipped = []
@@ -185,13 +193,11 @@ def patrol(size, obstacles, points):
         else:
             skipped.append([nx, ny])
 
-    result["path"] = full_path
-    result["unreachable_points"] = skipped
-    result["ok"] = True
+    msg = ""
     if skipped:
-        result["msg"] = ("已跳过 %d 个不可达巡检点，"
-                         "详见 unreachable_points" % len(skipped))
-    return result
+        msg = ("已跳过 %d 个不可达巡检点，"
+               "详见 unreachable_points" % len(skipped))
+    return PatrolPath(full_path, skipped, msg)
 
 
 # ======================================================================
@@ -282,23 +288,36 @@ def _self_test():
     points = [[0, 0], [5, 0], [0, 5]]
     r = patrol(6, wall, points)
     good, why = (False, "")
-    if (r["ok"] and r["unreachable_points"] == []
-            and r["path"][0] == [0, 0] and r["path"][-1] == [0, 5]
-            and [5, 0] in r["path"]):
-        good, why = _check_path(r["path"], 6, wall, [0, 0], [0, 5])
-    record("场景四", good, "path 长度 = %d，msg = \"%s\"" % (len(r["path"]), r["msg"]))
-    if r["ok"]:
-        print(_render_grid(6, wall, r["path"], {(0, 0): "1", (5, 0): "2", (0, 5): "3"}))
+    is_list = isinstance(r, list) and isinstance(r, PatrolPath)
+    if (is_list and r.unreachable_points == [] and r.msg == ""
+            and r[0] == [0, 0] and r[-1] == [0, 5] and [5, 0] in r):
+        good, why = _check_path(list(r), 6, wall, [0, 0], [0, 5])
+    # app.py 的接入写法：直接当 list 遍历，不取下标
+    consumed = [[int(p[0]), int(p[1])] for p in r]
+    record("场景四", good, "返回值类型 = %s，path 长度 = %d，msg = \"%s\""
+           % (type(r).__name__, len(consumed), r.msg))
+    if is_list:
+        print(_render_grid(6, wall, consumed, {(0, 0): "1", (5, 0): "2", (0, 5): "3"}))
     print("  （图例：.空地 #障碍 *路径 1/2/3 巡检点）")
 
     # ---- 场景五（附加）：中间巡检点不可达，跳过并记录 ----
     print("\n场景五（附加）：中间巡检点不可达 -> 跳过并记录")
     wall2 = [[5, y] for y in range(6)]   # x=5 整列封死
     r = patrol(6, wall2, [[0, 0], [5, 5], [0, 5]])
-    ok = (r["ok"]
-          and r["unreachable_points"] == [[5, 5]]
-          and r["path"] == [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]])
-    record("场景五", ok, "跳过点 = %s，msg = \"%s\"" % (r["unreachable_points"], r["msg"]))
+    ok = (isinstance(r, PatrolPath)
+          and r.unreachable_points == [[5, 5]]
+          and list(r) == [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]]
+          and "已跳过 1 个不可达巡检点" in r.msg)
+    record("场景五", ok, "跳过点 = %s，msg = \"%s\"" % (r.unreachable_points, r.msg))
+
+    # ---- 场景六（附加）：起点不可达 -> 空路径 + 全部点记入不可达 ----
+    print("\n场景六（附加）：起点巡检点落在障碍物上 -> 空路径，全部点跳过")
+    r = patrol(6, [[0, 0]], [[0, 0], [4, 4]])
+    ok = (isinstance(r, PatrolPath) and list(r) == []
+          and r.unreachable_points == [[0, 0], [4, 4]]
+          and r.msg != "")
+    record("场景六", ok, "path = %s，跳过点 = %s，msg = \"%s\""
+           % (list(r), r.unreachable_points, r.msg))
 
     print("\n" + "=" * 60)
     passed, total = sum(results), len(results)
@@ -312,4 +331,4 @@ if __name__ == "__main__":
     sys.exit(0 if _self_test() else 1)
 
 
-__all__ = ["bfs", "patrol"]
+__all__ = ["bfs", "patrol", "PatrolPath"]
