@@ -8,13 +8,16 @@
 | GET | `/api/robot` | 机器人 `x` / `y` / `angle` / `status` |
 | POST | `/api/move` | `{"direction": "up/down/left/right"}`，失败 409 |
 | GET | `/api/points` | 已登记的巡检点 |
-| POST | `/api/points` | `{"points": [[x,y]]}`，只登记点位、不启动移动；空数组即清空 |
-| POST | `/api/patrol` | `{"points": [[x,y]], "speed": 1}`，返回 `plan` |
+| POST | `/api/points` | `{"points": [[x,y]]}`，只登记点位、不启动移动；空数组即清空；巡检进行中改点返回 409 |
+| POST | `/api/patrol` | `{"points": [[x,y]], "speed": 1}`，返回 `plan`、`points`、`unreachable`；`speed` 非四档 409 |
+| POST | `/api/speed` | `{"speed": 2}`，运行中改速，从当前格续走；非行进中只记录 |
 | POST | `/api/stop` | 停止巡检 |
 | POST | `/api/reset` | 复位：机器人回 `(0,0)`，清空巡检点与进度 |
-| GET | `/api/sensor` | 传感器读数 + `progress` |
+| GET | `/api/sensor` | 传感器读数 + `progress`（纯读，无副作用） |
 
 字段定义见 [../docs/03_项目架构与接口.md](../docs/03_项目架构与接口.md)。
+
+进度由后台采样线程 `_watch_loop` 每 0.1 秒推进（首次启动巡检时懒创建），因此 `GET` 接口不再改状态、页面不轮询进度也会自己更新。
 
 ## 依赖版本
 
@@ -56,6 +59,10 @@ curl -s -X POST localhost:5050/api/points \
 # 启动巡检
 curl -s -X POST localhost:5050/api/patrol \
   -H 'Content-Type: application/json' -d '{"points":[[3,4]],"speed":2}'
+
+# 巡检中实时改速（从当前格按新速度续走，不重置进度）
+curl -s -X POST localhost:5050/api/speed \
+  -H 'Content-Type: application/json' -d '{"speed":4}'
 
 # 传感器读数与进度
 curl -s localhost:5050/api/sensor | python3 -m json.tool

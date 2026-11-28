@@ -11,7 +11,7 @@
 | 项 | 选型 |
 |---|---|
 | 前端 | 原生 HTML / CSS / JavaScript，单文件，无构建步骤 |
-| 后端 | Python Flask，八个 REST 接口 |
+| 后端 | Python Flask，九个 REST 接口 |
 | 绘图 | Canvas 2D，DPR 适配 |
 | 仿真 | 纯 Python 标准库：机器人运动、BFS 寻路、虚拟传感器 |
 | CI流水线 | GitHub Actions |
@@ -56,7 +56,7 @@ docker compose down
 
 **标准版**
 
-- Web 交互界面 + Flask 后端 API（八个接口）
+- Web 交互界面 + Flask 后端 API（九个接口）
 - 20×20 网格地图，障碍物、机器人实时渲染
 - 手动控制（方向键 / 屏幕按钮 / 键盘），越界与撞障被拦截并说明原因
 - BFS 路径规划 + 自动巡检
@@ -70,7 +70,8 @@ docker compose down
 - 仿真速度滑块 0.5x / 1x / 2x / 4x
 - 碰撞、越界、不可达三类告警弹窗，可关闭
 - 点击地图添加 / 移除巡检点
-- 巡检进度：已完成 / 总点位、剩余步数
+- 巡检进度：已完成 / 总点位、剩余步数（严格按登记顺序到达才计数，乱序不追认；增删点位后按前缀匹配重算）
+- 俯视小车渲染 + 动效（示警灯 / 轮辐 / 光束呼吸 / 手动单步短闪），行进中位置平滑插值
 
 > 依策划书要求，本项目不实现日志面板。
 
@@ -90,7 +91,7 @@ patrol-sim-std/
 │  │  └─ sensor_sim.py
 │  ├─ test/
 │  │  └─ test_sim.py
-│  ├─ app.py               # Flask 入口，八个 API + 托管前端
+│  ├─ app.py               # Flask 入口，九个 API + 托管前端
 │  ├─ requirements.txt
 │  ├─ test/                # 单元测试用例
 │  └─ README.md
@@ -114,8 +115,9 @@ patrol-sim-std/
 | GET | `/api/robot` | 机器人 x / y / angle / status |
 | POST | `/api/move` | 手动移动一格，失败返回 409 + 原因 |
 | GET | `/api/points` | 已登记的巡检点（页面加载时恢复） |
-| POST | `/api/points` | 登记 / 覆盖巡检点，不启动移动；手动模式的进度来源 |
-| POST | `/api/patrol` | 启动巡检，返回完整路径 |
+| POST | `/api/points` | 登记 / 覆盖巡检点，不启动移动；手动模式的进度来源；巡检进行中改点返回 409 |
+| POST | `/api/patrol` | 启动巡检，返回完整路径；`speed` 非四档返回 409 |
+| POST | `/api/speed` | 运行中调整巡检速度，从当前格续走 |
 | POST | `/api/stop` | 停止巡检 |
 | POST | `/api/reset` | 复位：机器人回起点，清空巡检点与进度 |
 | GET | `/api/sensor` | 传感器读数 + 巡检进度 |

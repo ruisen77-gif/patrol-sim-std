@@ -231,6 +231,7 @@
         <div class="hint">
           点击地图画布即可<b>添加巡检点</b>，再次点击该点可移除。<br>
           方向键或键盘 ↑↓←→ 可手动移动机器人。<br>
+          巡检中拖动速度滑块可<b>实时改速</b>。<br>
           巡检点最多 6 个。
         </div>
       </div>
@@ -289,6 +290,9 @@
   var map = { size: SIZE, obstacles: [], max_patrol_points: 6 };
   var obstacles = [];
   var robot = null;
+  // 位置插值：轮询 1 秒一次，直接画真实坐标会让车“每秒瞬移 2–3 格”，
+  // 这里在两次采样之间做线性过渡，行进时看起来是连续移动。
+  var anim = { fromX: 0, fromY: 0, toX: 0, toY: 0, fromA: 0, toA: 0, t0: 0, dur: 1000 };
   var sensor = null;
   var patrolPoints = [];
   var plan = [];
@@ -298,6 +302,7 @@
   var lastAlert = null;
   var prevCollision = false;
   var prevOut = false;
+  var prevOutOrder = [];   // 上一轮已记录的“乱序到访”点位，用于只弹一次提示
   var polling = false;
 
   /* ---------- 工具 ---------- */
@@ -307,6 +312,38 @@
     return fetch(path, opt).then(function (r) {
       return r.json().then(function (d) { return { code: r.status, data: d }; });
     });
+  }
+
+  /* ---------- 位置插值 ---------- */
+  // 收到新状态时记录“上一位置 → 新位置”，draw 里按时间比例取中间点
+  function setRobot(nr) {
+    if (!nr) return;
+    if (robot && (nr.x !== robot.x || nr.y !== robot.y || nr.angle !== robot.angle)) {
+      anim.fromX = robot.x; anim.fromY = robot.y;
+      anim.toX = nr.x; anim.toY = nr.y;
+      anim.fromA = robot.angle || 0;
+      anim.toA = nr.angle || 0;
+      anim.t0 = performance.now();
+    } else if (!robot) {
+      anim.fromX = anim.toX = nr.x; anim.fromY = anim.toY = nr.y;
+      anim.fromA = anim.toA = nr.angle || 0;
+      anim.t0 = 0;
+    }
+    robot = nr;
+  }
+
+  function displayPos() {
+    var x = robot.x, y = robot.y, angle = robot.angle || 0;
+    // 只有自动巡检行进中才插值；手动移动是单格瞬移，直接画真实位置
+    if (robot.status === "moving") {
+      var k = Math.min(1, (performance.now() - anim.t0) / anim.dur);
+      k = Math.max(0, k);
+      x = anim.fromX + (anim.toX - anim.fromX) * k;
+      y = anim.fromY + (anim.toY - anim.fromY) * k;
+      var da = ((anim.toA - anim.fromA + 540) % 360) - 180;   // 走最短角度
+      angle = anim.fromA + da * k;
+    }
+    return { x: x, y: y, angle: angle };
   }
 
   function toast(type, msg) {
@@ -416,23 +453,30 @@
     // 巡检点
     var target = sensor && sensor.target ? sensor.target : null;
     var visited = sensor && sensor.visited ? sensor.visited : [];
+    var outOfOrder = sensor && sensor.out_of_order ? sensor.out_of_order : [];
     patrolPoints.forEach(function (p, n) {
       var cx = px(p[0]) + CELL / 2, cy = px(p[1]) + CELL / 2;
       var isTarget = target && target[0] === p[0] && target[1] === p[1];
       var isVisited = visited.some(function (v) { return v[0] === p[0] && v[1] === p[1]; });
+      var isOutOrder = !isTarget && outOfOrder.some(function (v) { return v[0] === p[0] && v[1] === p[1]; });
 
       ctx.beginPath();
       ctx.arc(cx, cy, 10, 0, Math.PI * 2);
       ctx.fillStyle = isTarget ? "rgba(255,204,0,0.22)" :
+                      isOutOrder ? "rgba(255,159,67,0.20)" :
                       isVisited ? "rgba(95,240,176,0.18)" : "rgba(0,229,255,0.14)";
       ctx.fill();
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = isTarget ? "#ffcc00" : isVisited ? "#5ff0b0" : "rgba(0,229,255,0.85)";
+      ctx.strokeStyle = isTarget ? "#ffcc00" :
+                        isOutOrder ? "#ff9f43" :
+                        isVisited ? "#5ff0b0" : "rgba(0,229,255,0.85)";
       if (isTarget) { ctx.shadowColor = "#ffcc00"; ctx.shadowBlur = 12; }
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      ctx.fillStyle = isTarget ? "#ffcc00" : isVisited ? "#5ff0b0" : "#bfefff";
+      ctx.fillStyle = isTarget ? "#ffcc00" :
+                      isOutOrder ? "#ff9f43" :
+                      isVisited ? "#5ff0b0" : "#bfefff";
       ctx.font = "bold 11px Menlo, monospace";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -441,8 +485,9 @@
 
     // 机器人（俯视小车，车头朝 +x，随 angle 旋转）
     if (robot) {
-      var cx2 = px(robot.x) + CELL / 2, cy2 = px(robot.y) + CELL / 2;
-      var a = (robot.angle || 0) * Math.PI / 180;
+      var disp = displayPos();
+      var cx2 = px(disp.x) + CELL / 2, cy2 = px(disp.y) + CELL / 2;
+      var a = disp.angle * Math.PI / 180;
       var moving = robot.status === "moving";
       var flash = FX && performance.now() < fxUntil;   // 手动单步后的短闪
       var active = moving || flash;
@@ -676,7 +721,7 @@
     var pg = sensor && sensor.progress ? sensor.progress
              : { finished: 0, total: 0, remain: 0, mode: "idle" };
     var note = pg.mode === "auto" ? "剩余 " + pg.remain + " 步" :
-               pg.total ? "手动巡检" : "未开始";
+               pg.total ? "手动巡检 · 按顺序" : "未开始";
     document.getElementById("vTask").innerHTML =
       pg.finished + " / " + pg.total + "<small>" + note + "</small>";
     document.getElementById("vBar").style.width =
@@ -728,7 +773,7 @@
     polling = true;
     Promise.all([api("/api/robot"), api("/api/sensor")])
       .then(function (res) {
-        robot = res[0].data;
+        setRobot(res[0].data);
         sensor = res[1].data;
         syncIndex();
 
@@ -736,6 +781,20 @@
         if (sensor.collision && !prevCollision) toast("collision", "机器人当前位置与障碍物重合");
         prevOut = !!sensor.out_of_bound;
         prevCollision = !!sensor.collision;
+
+        // 未按顺序到达：该点位已到访但不计入进度，提示一次
+        var ooo = sensor.out_of_order || [];
+        var tgt = sensor.target;
+        ooo.forEach(function (p) {
+          var known = prevOutOrder.some(function (q) { return q[0] === p[0] && q[1] === p[1]; });
+          if (known) return;
+          var pIdx = patrolPoints.findIndex(function (q) { return q[0] === p[0] && q[1] === p[1]; });
+          var tIdx = tgt ? patrolPoints.findIndex(function (q) { return q[0] === tgt[0] && q[1] === tgt[1]; }) : -1;
+          toast("plan_failed",
+            "未按顺序到达 P" + (pIdx + 1) + "，进度不更新：" +
+            (tIdx >= 0 ? "请先到达 P" + (tIdx + 1) : "请按登记顺序依次到达"));
+        });
+        prevOutOrder = ooo;
 
         render();
         if (FX && ((robot && robot.status === "moving") || fxActive())) startAnim();
@@ -784,6 +843,15 @@
     speedIdx = parseInt(slider.value, 10);
     speed = SPEEDS[speedIdx];
     document.getElementById("speedNow").textContent = speed + "x";
+  };
+  // 巡检进行中拖动滑块：通知后端从当前格按新速度续走（不影响已算好的路径与进度）
+  slider.onchange = function () {
+    if (!robot || robot.status !== "moving") return;
+    api("/api/speed", { method: "POST", body: JSON.stringify({ speed: speed }) })
+      .then(function (res) {
+        if (!res.data.ok) toast("plan_failed", res.data.msg || "速度调整失败");
+      })
+      .catch(function () {});
   };
 
   /* ---------- 巡检点登记（后端是进度唯一来源） ---------- */
@@ -858,6 +926,7 @@
       lastAlert = null;
       prevCollision = false;
       prevOut = false;
+      prevOutOrder = [];
       fxUntil = 0;
       toast("plan_failed", "已复位：机器人回到起点，巡检点与进度已清空");
       poll();
@@ -887,7 +956,14 @@
   }).catch(function () {});
 
   poll();
-  setInterval(poll, 1000);
+  // 自适应采样：行进中 250ms 一次（位置插值才不会被 1 秒采样拉出明显滞后），静止时 1s 一次
+  function pollTick() {
+    var gap = (robot && robot.status === "moving") ? 250 : 1000;
+    anim.dur = gap;
+    poll();
+    setTimeout(pollTick, gap);
+  }
+  setTimeout(pollTick, 1000);
 })();
 </script>
 </body>
