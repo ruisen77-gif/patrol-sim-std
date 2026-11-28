@@ -88,6 +88,8 @@ patrol-sim-std/
 │  │  ├─ path_planner.py
 │  │  ├─ robot_sim.py
 │  │  └─ sensor_sim.py
+│  ├─ test/
+│  │  └─ test_sim.py
 │  ├─ app.py               # Flask 入口，六个 API + 托管前端
 │  ├─ requirements.txt
 │  ├─ test/                # 单元测试用例
