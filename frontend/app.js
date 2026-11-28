@@ -19,9 +19,19 @@
   var map = { size: SIZE, obstacles: [], max_patrol_points: 6 };
   var obstacles = [];
   var robot = null;
-  // 位置插值：轮询 1 秒一次，直接画真实坐标会让车“每秒瞬移 2–3 格”，
-  // 这里在两次采样之间做线性过渡，行进时看起来是连续移动。
-  var anim = { fromX: 0, fromY: 0, toX: 0, toY: 0, fromA: 0, toA: 0, t0: 0, dur: 1000 };
+  // 平滑移动：服务端逐格推进（每格 CELL_SECONDS/speed 秒），轮询只给离散采样点。
+  // view 是画面上实际显示的位置，aim 是最新采样位置；有巡检路径时沿路径按车速推进，
+  // 其余情况按采样方向外推并缓速贴齐，避免每次采样都跳回上一格再滑过去。
+  var CELL_SECONDS = 0.4;
+  var view = { x: 0, y: 0, a: 0, ready: false };
+  var aim = { x: 0, y: 0, a: 0 };
+  var drift = { vx: 0, vy: 0 };   // 外推速度，单位：格/秒
+  var lastMove = 0;               // 最近一次观察到位置变化的时间，用来判断是否仍在真实行进
+  var lastFrame = 0;
+  var heldDir = null;             // 当前按住的方向键；用自建定时器统一节奏，摆脱系统连发延迟
+  var moveTimer = null;           // 按住时的移动定时器
+  var viewS = 0;                  // 沿规划路径的进度（格），让车贴着路径走而不是直线外推
+  var trailS = 0;                 // 轨迹已走进度（格），只增不减，让实线跟着车而不是跟采样
   var sensor = null;
   var patrolPoints = [];
   var plan = [];
@@ -43,36 +53,150 @@
     });
   }
 
-  /* ---------- 位置插值 ---------- */
-  // 收到新状态时记录“上一位置 → 新位置”，draw 里按时间比例取中间点
+  /* ---------- 平滑移动 ---------- */
+  // 新采样到达：记下目标位置，并按采样位移的方向更新外推速度（大小用当前档位的真实车速）
   function setRobot(nr) {
     if (!nr) return;
-    if (robot && (nr.x !== robot.x || nr.y !== robot.y || nr.angle !== robot.angle)) {
-      anim.fromX = robot.x; anim.fromY = robot.y;
-      anim.toX = nr.x; anim.toY = nr.y;
-      anim.fromA = robot.angle || 0;
-      anim.toA = nr.angle || 0;
-      anim.t0 = performance.now();
-    } else if (!robot) {
-      anim.fromX = anim.toX = nr.x; anim.fromY = anim.toY = nr.y;
-      anim.fromA = anim.toA = nr.angle || 0;
-      anim.t0 = 0;
+    var dx = nr.x - aim.x, dy = nr.y - aim.y;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    if (d > 0.001) {
+      var v = speed / CELL_SECONDS / d;   // 速度取当前档位的真实车速，位移只提供方向
+      drift.vx = dx * v;
+      drift.vy = dy * v;
+      lastMove = performance.now();
+    }
+    aim.x = nr.x; aim.y = nr.y; aim.a = nr.angle || 0;
+    if (!view.ready) {
+      view.x = aim.x; view.y = aim.y; view.a = aim.a;
+      view.ready = true;
     }
     robot = nr;
   }
 
-  function displayPos() {
-    var x = robot.x, y = robot.y, angle = robot.angle || 0;
-    // 只有自动巡检行进中才插值；手动移动是单格瞬移，直接画真实位置
-    if (robot.status === "moving") {
-      var k = Math.min(1, (performance.now() - anim.t0) / anim.dur);
-      k = Math.max(0, k);
-      x = anim.fromX + (anim.toX - anim.fromX) * k;
-      y = anim.fromY + (anim.toY - anim.fromY) * k;
-      var da = ((anim.toA - anim.fromA + 540) % 360) - 180;   // 走最短角度
-      angle = anim.fromA + da * k;
+  // 路径前方要走的朝向：提前约一次转向的时间开始旋转，让车头在拐角处刚好转正，
+  // 不会出现“人已经往下走、车头还朝右”的横向滑行。
+  function turnHeading(s, v) {
+    var k = Math.max(0, Math.min(plan.length - 2, Math.floor(s)));
+    var sx = Math.sign(plan[k + 1][0] - plan[k][0]);
+    var sy = Math.sign(plan[k + 1][1] - plan[k][1]);
+    var j = k;
+    while (j + 2 < plan.length &&
+           Math.sign(plan[j + 2][0] - plan[j + 1][0]) === sx &&
+           Math.sign(plan[j + 2][1] - plan[j + 1][1]) === sy) {
+      j++;
     }
-    return { x: x, y: y, angle: angle };
+    var cornerAt = j + 1;
+    var dx = sx, dy = sy;
+    if (j + 2 < plan.length && cornerAt - s <= Math.min(0.8, v * 0.05)) {
+      dx = Math.sign(plan[j + 2][0] - plan[j + 1][0]);
+      dy = Math.sign(plan[j + 2][1] - plan[j + 1][1]);
+    }
+    if (dx > 0) return 0;
+    if (dy > 0) return 90;
+    if (dx < 0) return 180;
+    return 270;
+  }
+
+  function pathPoint(s) {
+    var k = Math.max(0, Math.min(plan.length - 2, Math.floor(s)));
+    var f = Math.min(1, Math.max(0, s - k));
+    return {
+      x: plan[k][0] + (plan[k + 1][0] - plan[k][0]) * f,
+      y: plan[k][1] + (plan[k + 1][1] - plan[k][1]) * f
+    };
+  }
+
+  // 每帧推进显示位置：有规划路径时贴着路径按真实车速走（转弯不甩尾、不冲过巡检点），
+  // 没有路径（手动单步、别人启动的巡检）时退回采样点外推 + 收尾贴齐。
+  function advanceView(now) {
+    var dt = Math.min(0.1, (now - lastFrame) / 1000);
+    lastFrame = now;
+    if (!view.ready || !(dt > 0)) return;
+
+    var moving = robot && robot.status === "moving";
+    // 用 pathIndex 而不是“第一次出现的格子”：掉头回原路时同一格会在 plan 里出现两次，
+    // 取第一次会出现游标倒退，画面就会多转一次头。
+    var idx = -1;
+    if (moving && plan.length && plan[pathIndex] &&
+        plan[pathIndex][0] === robot.x && plan[pathIndex][1] === robot.y) {
+      idx = pathIndex;
+    }
+    var dx = aim.x - view.x, dy = aim.y - view.y;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    var heading = null;
+
+    var v = speed / CELL_SECONDS;
+    if (idx >= 0 && plan.length > 1) {
+      viewS += v * dt;
+      // idx 只在轮询时刷新，高倍速下两次轮询之间要跑好几格。用“最后一次采样 + 已过时间 × 车速”
+      // 预测服务端此刻的进度，只在大偏差时缓速纠偏；不能对 idx 硬限位，否则画面会在两次轮询之间卡住。
+      // lastMove 为 0（还没动过）或太久没更新（机器人卡住仍显示 moving）时不预测，否则会冲到终点再被拽回。
+      var sinceMove = lastMove && now - lastMove < 1200 ? now - lastMove : 0;
+      var pred = idx + sinceMove * v / 1000;
+      if (pred > plan.length - 1) pred = plan.length - 1;
+      var err = viewS - pred;
+      if (Math.abs(err) > 1.1) {                      // 1 格是采样取整带来的固有偏差，超过才是真跑偏
+        var fix = -err * Math.min(1, 5 * dt);
+        fix = Math.max(-v * dt, Math.min(2 * v * dt, fix));  // 最多减速到停，不倒车
+        viewS += fix;
+      }
+      if (viewS < 0) viewS = 0;
+      if (viewS > plan.length - 1) viewS = plan.length - 1;
+      if (viewS > trailS) trailS = viewS;   // 实线只进不退，避免采样回退时轨迹闪烁
+      var p = pathPoint(viewS);
+      if (Math.abs(p.x - view.x) + Math.abs(p.y - view.y) > 3.5) {
+        viewS = pred;                                 // 复位一类的瞬移：直接回到路径上
+        p = pathPoint(viewS);
+      }
+      view.x = p.x; view.y = p.y;
+      heading = turnHeading(viewS, v);
+    } else if (dist > 20) {                         // 真·瞬移（复位到很远处）兜底；正常手动/自动不会到这步
+      view.x = aim.x; view.y = aim.y;
+    } else if (moving && lastMove && now - lastMove < 1200) {
+      var vlen = Math.sqrt(drift.vx * drift.vx + drift.vy * drift.vy);
+      var ux, uy;
+      if (vlen > 0.01) { ux = drift.vx / vlen; uy = drift.vy / vlen; }
+      else if (dist > 0.001) { ux = dx / dist; uy = dy / dist; }
+      else { ux = 0; uy = 0; }
+
+      if (ux || uy) {
+        view.x += ux * vlen * dt;
+        view.y += uy * vlen * dt;
+
+        dx = aim.x - view.x;
+        dy = aim.y - view.y;
+        var along = dx * ux + dy * uy;
+        var kp = Math.min(1, 8 * dt);
+        var ka = Math.min(1, 3 * dt);
+        view.x += (dx - along * ux) * kp + ux * along * ka;
+        view.y += (dy - along * uy) * kp + uy * along * ka;
+      }
+    } else {                                 // 手动单步 / 静止 / 任务结束后收尾
+      // 单步时 ~10 格/秒平滑前进；按住时自建定时器也是 10 格/秒，画面与机器人同速，
+      // 无停顿、无残留，换方向也不甩尾
+      var spd = Math.min(45, 10 * Math.max(1, dist));
+      var step = Math.min(dist, spd * dt);
+      if (dist > 0.0005) {
+        view.x += dx / dist * step;
+        view.y += dy / dist * step;
+      }
+    }
+
+    var want = heading == null ? aim.a : heading;
+    var da = ((want - view.a + 540) % 360) - 180;    // 走最短角度
+    // 转向速度随倍速提高：高倍速下一格只有 100ms，转 90° 必须在一格内完成，否则车头拖在后面
+    var maxTurn = (400 + 320 * v) * dt;
+    if (Math.abs(da) <= maxTurn) view.a = want;
+    else view.a += da > 0 ? maxTurn : -maxTurn;
+  }
+
+  function atAim() {
+    return Math.abs(aim.x - view.x) < 0.01 && Math.abs(aim.y - view.y) < 0.01 &&
+           Math.abs(aim.a - view.a) < 0.5;
+  }
+
+  function displayPos() {
+    return { x: view.x, y: view.y, angle: view.a };
   }
 
   function toast(type, msg) {
@@ -99,6 +223,7 @@
   function px(i) { return PAD + i * CELL; }
 
   function draw() {
+    advanceView(performance.now());
     ctx.clearRect(0, 0, W, W);
 
     var g = ctx.createRadialGradient(W / 2, W / 2, 60, W / 2, W / 2, W * 0.75);
@@ -136,8 +261,13 @@
       ctx.stroke();
     });
 
+    // 实线/虚线的分界跟着画面上的车走；若用每 250ms 才刷新的 pathIndex，高倍速下实线会落在车后面
+    var cutS = plan.length > 1 ? trailS : pathIndex;
+    var pk = Math.max(0, Math.min(plan.length - 1, Math.floor(cutS)));
+    var tip = plan.length > 1 ? pathPoint(cutS) : null;
+
     // 已走过
-    if (plan.length > 1 && pathIndex > 0) {
+    if (plan.length > 1 && cutS > 0) {
       ctx.save();
       ctx.shadowColor = "rgba(127,216,255,0.65)";
       ctx.shadowBlur = 8;
@@ -145,17 +275,18 @@
       ctx.lineWidth = 3;
       ctx.lineJoin = "round";
       ctx.beginPath();
-      for (var k = 0; k <= pathIndex && k < plan.length; k++) {
+      for (var k = 0; k <= pk; k++) {
         var vx = px(plan[k][0]) + CELL / 2;
         var vy = px(plan[k][1]) + CELL / 2;
         if (k === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
       }
+      ctx.lineTo(px(tip.x) + CELL / 2, px(tip.y) + CELL / 2);
       ctx.stroke();
       ctx.restore();
     }
 
     // 待行进
-    if (plan.length > pathIndex + 1) {
+    if (plan.length > 1 && cutS < plan.length - 1) {
       ctx.save();
       ctx.setLineDash([6, 6]);
       ctx.shadowColor = "rgba(0,229,255,0.6)";
@@ -163,16 +294,15 @@
       ctx.strokeStyle = "rgba(0,229,255,0.85)";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      for (var j = pathIndex; j < plan.length; j++) {
-        var nx = px(plan[j][0]) + CELL / 2;
-        var ny = px(plan[j][1]) + CELL / 2;
-        if (j === pathIndex) ctx.moveTo(nx, ny); else ctx.lineTo(nx, ny);
+      ctx.moveTo(px(tip.x) + CELL / 2, px(tip.y) + CELL / 2);
+      for (var j = pk + 1; j < plan.length; j++) {
+        ctx.lineTo(px(plan[j][0]) + CELL / 2, px(plan[j][1]) + CELL / 2);
       }
       ctx.stroke();
       ctx.restore();
 
       ctx.fillStyle = "rgba(0,229,255,0.9)";
-      for (var d = pathIndex; d < plan.length; d++) {
+      for (var d = pk + 1; d < plan.length; d++) {
         ctx.beginPath();
         ctx.arc(px(plan[d][0]) + CELL / 2, px(plan[d][1]) + CELL / 2, 2.2, 0, Math.PI * 2);
         ctx.fill();
@@ -464,6 +594,7 @@
   function render() {
     draw();
     renderCards();
+    startAnim();   // 行进中或还没贴到采样点时保持逐帧刷新，其余情况自行停帧
   }
 
   /* ---------- 进度同步 ---------- */
@@ -487,7 +618,7 @@
     animOn = true;
     var step = function () {
       draw();
-      if ((robot && robot.status === "moving") || fxActive()) {
+      if ((robot && robot.status === "moving") || fxActive() || !atAim()) {
         requestAnimationFrame(step);
       } else {
         animOn = false;
@@ -526,7 +657,6 @@
         prevOutOrder = ooo;
 
         render();
-        if (FX && ((robot && robot.status === "moving") || fxActive())) startAnim();
       })
       .catch(function () {
         document.getElementById("systext").textContent = "后端连接中断";
@@ -562,9 +692,26 @@
     b.onclick = function () { move(b.dataset.dir); };
   });
 
+  var KEYMAP = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
   window.addEventListener("keydown", function (e) {
-    var map2 = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
-    if (map2[e.key]) { e.preventDefault(); move(map2[e.key]); }
+    var dir = KEYMAP[e.key];
+    if (!dir) return;
+    e.preventDefault();
+    if (e.repeat) return;          // 忽略系统自动连发，节奏交给自建定时器，消除换键时的连发延迟停顿
+    var wasHolding = !!heldDir;
+    heldDir = dir;
+    if (!wasHolding) {
+      move(dir);                   // 首次按下立即响应
+      moveTimer = setInterval(function () { if (heldDir) move(heldDir); }, 100);
+    }
+  });
+  window.addEventListener("keyup", function (e) {
+    var dir = KEYMAP[e.key];
+    if (!dir) return;
+    if (heldDir === dir) {
+      heldDir = null;
+      if (moveTimer) { clearInterval(moveTimer); moveTimer = null; }
+    }
   });
 
   var slider = document.getElementById("speed");
@@ -637,6 +784,8 @@
       if (!res.data.ok) { toast("plan_failed", res.data.msg || "启动失败"); return; }
       plan = res.data.plan || [];
       pathIndex = 0;
+      viewS = 0;
+      trailS = 0;
       if (res.data.msg) toast("plan_failed", res.data.msg);
       poll();
     }).catch(function () { toast("plan_failed", "无法连接后端"); });
@@ -652,6 +801,9 @@
       patrolPoints = [];
       plan = [];
       pathIndex = 0;
+      viewS = 0;
+      trailS = 0;
+      view.ready = false;   // 复位后下一采样直接把画面贴回起点，不再依赖大距离贴齐阈值
       lastAlert = null;
       prevCollision = false;
       prevOut = false;
@@ -666,6 +818,8 @@
     patrolPoints = [];
     plan = [];
     pathIndex = 0;
+    viewS = 0;
+    trailS = 0;
     pushPoints();
     render();
   };
@@ -685,10 +839,9 @@
   }).catch(function () {});
 
   poll();
-  // 自适应采样：行进中 250ms 一次（位置插值才不会被 1 秒采样拉出明显滞后），静止时 1s 一次
+  // 自适应采样：行进中 250ms 一次（转弯方向修正更及时），静止时 1s 一次
   function pollTick() {
     var gap = (robot && robot.status === "moving") ? 250 : 1000;
-    anim.dur = gap;
     poll();
     setTimeout(pollTick, gap);
   }
