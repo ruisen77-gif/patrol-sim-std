@@ -133,7 +133,7 @@
   }
   .stage::before{left:6px;top:6px;border-right:none;border-bottom:none;}
   .stage::after{right:6px;bottom:6px;border-left:none;border-top:none;}
-  canvas{width:min(600px,100%);height:auto;display:block;cursor:crosshair;}
+  canvas{width:min(820px,100%);height:auto;display:block;cursor:crosshair;}
 
   /* ---------- 底部卡片 ---------- */
   .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;}
@@ -212,6 +212,7 @@
         <h2>任务</h2>
         <button class="btn primary" id="btnStart">启动自动巡检</button>
         <button class="btn danger" id="btnStop">停止任务</button>
+        <button class="btn ghost" id="btnReset">复位机器人</button>
         <button class="btn ghost" id="btnClear">清空巡检点</button>
       </div>
 
@@ -271,9 +272,12 @@
 (function () {
   "use strict";
 
-  var SIZE = 20, PAD = 20, CELL = 28;
+  var SIZE = 20, PAD = 22, CELL = 40;
   var W = SIZE * CELL + PAD * 2;
   var SPEEDS = [0.5, 1, 2, 4];
+  var FX = true;               // 车辆动态细节总开关：改 false 即回到纯静态小车
+  var FX_FLASH_MS = 240;       // 手动单步移动后的动效短闪时长（毫秒）
+  var fxUntil = 0;             // 短闪截止时间戳，performance.now() 小于它时视为“刚动过”
 
   var canvas = document.getElementById("map");
   var ctx = canvas.getContext("2d");
@@ -411,53 +415,220 @@
 
     // 巡检点
     var target = sensor && sensor.target ? sensor.target : null;
+    var visited = sensor && sensor.visited ? sensor.visited : [];
     patrolPoints.forEach(function (p, n) {
       var cx = px(p[0]) + CELL / 2, cy = px(p[1]) + CELL / 2;
       var isTarget = target && target[0] === p[0] && target[1] === p[1];
+      var isVisited = visited.some(function (v) { return v[0] === p[0] && v[1] === p[1]; });
 
       ctx.beginPath();
-      ctx.arc(cx, cy, 8, 0, Math.PI * 2);
-      ctx.fillStyle = isTarget ? "rgba(255,204,0,0.22)" : "rgba(0,229,255,0.14)";
+      ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+      ctx.fillStyle = isTarget ? "rgba(255,204,0,0.22)" :
+                      isVisited ? "rgba(95,240,176,0.18)" : "rgba(0,229,255,0.14)";
       ctx.fill();
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = isTarget ? "#ffcc00" : "rgba(0,229,255,0.85)";
+      ctx.strokeStyle = isTarget ? "#ffcc00" : isVisited ? "#5ff0b0" : "rgba(0,229,255,0.85)";
       if (isTarget) { ctx.shadowColor = "#ffcc00"; ctx.shadowBlur = 12; }
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      ctx.fillStyle = isTarget ? "#ffcc00" : "#bfefff";
-      ctx.font = "bold 10px Menlo, monospace";
+      ctx.fillStyle = isTarget ? "#ffcc00" : isVisited ? "#5ff0b0" : "#bfefff";
+      ctx.font = "bold 11px Menlo, monospace";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText("P" + (n + 1), cx, cy + 0.5);
     });
 
-    // 机器人
+    // 机器人（俯视小车，车头朝 +x，随 angle 旋转）
     if (robot) {
-      var rx = px(robot.x), ry = px(robot.y);
-      var cx2 = rx + CELL / 2, cy2 = ry + CELL / 2;
+      var cx2 = px(robot.x) + CELL / 2, cy2 = px(robot.y) + CELL / 2;
+      var a = (robot.angle || 0) * Math.PI / 180;
+      var moving = robot.status === "moving";
+      var flash = FX && performance.now() < fxUntil;   // 手动单步后的短闪
+      var active = moving || flash;
+      var alarm = !!(sensor && (sensor.collision || sensor.out_of_bound));
+      var now = performance.now() / 1000;
+      var spin = (FX && active) ? now * 8 : 0;    // 轮胎轮辐转动相位
+      var blink = (Math.floor(now * (flash ? 12 : 3)) % 2) === 0; // 示警灯：常态 3Hz，短闪时 12Hz
+
+      var bodyTop = alarm ? "#ffd0d5" : active ? "#d9fbff" : "#eef6ff";
+      var bodyMid = alarm ? "#e85560" : active ? "#68d7e8" : "#a9c8e6";
+      var bodyBottom = alarm ? "#9c1c26" : active ? "#1f8fa4" : "#6d94bd";
+      var edge = alarm ? "#5c0a12" : active ? "#0b4351" : "#122c45";
+
+      // 地面投影
       ctx.save();
-      ctx.shadowColor = "rgba(30,144,255,0.9)";
-      ctx.shadowBlur = 16;
-      ctx.fillStyle = "rgba(30,144,255,0.9)";
+      ctx.fillStyle = "rgba(0,0,0,0.42)";
       ctx.beginPath();
-      var r = 6;
-      if (ctx.roundRect) ctx.roundRect(cx2 - r, cy2 - r, r * 2, r * 2, 3);
-      else ctx.rect(cx2 - r, cy2 - r, r * 2, r * 2);
+      ctx.ellipse(cx2 + 2, cy2 + 3, 19, 10, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
-      var a = (robot.angle || 0) * Math.PI / 180;
-      ctx.fillStyle = "#eaf7ff";
+      ctx.save();
+      ctx.translate(cx2, cy2);
+      ctx.rotate(a);
+
+      // 四个轮胎：深色胎面 + 细轮辋，移动时轮辐转动
+      [[9.0, -7.7], [9.0, 7.7], [-12.0, -7.7], [-12.0, 7.7]].forEach(function (w) {
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(w[0] - 3.7, w[1] - 2.1, 7.4, 4.2, 1.6);
+        else ctx.rect(w[0] - 3.7, w[1] - 2.1, 7.4, 4.2);
+        ctx.fillStyle = "#0f2030";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(150,185,215,0.5)";
+        ctx.lineWidth = 0.9;
+        ctx.stroke();
+
+        if (FX && active) {
+          ctx.save();
+          ctx.translate(w[0], w[1]);
+          ctx.rotate(spin);
+          ctx.strokeStyle = "rgba(190,222,242,0.55)";
+          ctx.lineWidth = 0.9;
+          ctx.beginPath();
+          ctx.moveTo(-2.6, 0); ctx.lineTo(2.6, 0);
+          ctx.moveTo(0, -1.5); ctx.lineTo(0, 1.5);
+          ctx.stroke();
+          ctx.restore();
+        }
+      });
+
+      // 车身：前窄后宽的俯视轮廓
       ctx.beginPath();
-      ctx.arc(cx2, cy2, 2.2, 0, Math.PI * 2);
+      ctx.moveTo(-14.4, -7.1);
+      ctx.lineTo(6.0, -7.1);
+      ctx.quadraticCurveTo(14.2, -7.1, 17.2, -4.4);
+      ctx.quadraticCurveTo(18.6, -2.0, 18.6, 0);
+      ctx.quadraticCurveTo(18.6, 2.0, 17.2, 4.4);
+      ctx.quadraticCurveTo(14.2, 7.1, 6.0, 7.1);
+      ctx.lineTo(-14.4, 7.1);
+      ctx.quadraticCurveTo(-18.2, 7.1, -18.2, 3.6);
+      ctx.lineTo(-18.2, -3.6);
+      ctx.quadraticCurveTo(-18.2, -7.1, -14.4, -7.1);
+      ctx.closePath();
+
+      var grad = ctx.createLinearGradient(0, -7, 0, 7);
+      grad.addColorStop(0, bodyBottom);
+      grad.addColorStop(0.35, bodyMid);
+      grad.addColorStop(0.62, bodyTop);
+      grad.addColorStop(1, bodyMid);
+      ctx.fillStyle = grad;
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = alarm ? "rgba(255,71,87,0.95)" :
+                       moving ? "rgba(0,229,255,0.85)" : "rgba(140,200,255,0.6)";
+      ctx.shadowBlur = alarm ? 16 : moving ? 15 : 7;
       ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // 引擎盖高光（车头一侧更亮，帮助辨认前脸）
+      ctx.fillStyle = "rgba(255,255,255,0.22)";
       ctx.beginPath();
-      ctx.moveTo(cx2 + Math.cos(a) * 8, cy2 + Math.sin(a) * 8);
-      ctx.lineTo(cx2 + Math.cos(a + 2.5) * 5, cy2 + Math.sin(a + 2.5) * 5);
-      ctx.lineTo(cx2 + Math.cos(a - 2.5) * 5, cy2 + Math.sin(a - 2.5) * 5);
+      ctx.moveTo(9.0, -5.4);
+      ctx.lineTo(16.0, -3.0);
+      ctx.lineTo(16.0, 3.0);
+      ctx.lineTo(9.0, 5.4);
       ctx.closePath();
       ctx.fill();
+
+      // 引擎盖分缝
+      ctx.strokeStyle = "rgba(10,30,48,0.35)";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(7.0, -6.6);
+      ctx.quadraticCurveTo(8.2, 0, 7.0, 6.6);
+      ctx.stroke();
+
+      // 座舱玻璃（后宽前窄的梯形）
+      ctx.fillStyle = alarm ? "rgba(74,12,18,0.92)" : "rgba(16,46,66,0.94)";
+      ctx.beginPath();
+      ctx.moveTo(-10.6, -5.0);
+      ctx.lineTo(2.6, -4.2);
+      ctx.lineTo(5.6, -2.8);
+      ctx.lineTo(5.6, 2.8);
+      ctx.lineTo(2.6, 4.2);
+      ctx.lineTo(-10.6, 5.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = alarm ? "rgba(255,150,160,0.7)" : "rgba(140,232,255,0.65)";
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+
+      // 前风挡反光
+      ctx.fillStyle = "rgba(190,240,255,0.35)";
+      ctx.beginPath();
+      ctx.moveTo(3.0, -4.0);
+      ctx.lineTo(5.2, -2.7);
+      ctx.lineTo(5.2, -0.4);
+      ctx.lineTo(3.0, -1.4);
+      ctx.closePath();
+      ctx.fill();
+
+      // 后视镜
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 1;
+      [[5.8, -8.3], [5.8, 8.3]].forEach(function (m) {
+        ctx.fillStyle = bodyMid;
+        ctx.beginPath();
+        ctx.ellipse(m[0], m[1], 2.8, 1.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+
+      // 车顶示警灯：行进中与手动单步短闪期间红蓝交替闪烁
+      if (FX && (active || alarm)) {
+        var beaconColor = alarm ? "#ff3b4e" : (blink ? "#ff4d5e" : "#3b8cff");
+        var haloColor = alarm ? "rgba(255,59,78,0.30)" :
+                        blink ? "rgba(255,77,94,0.30)" : "rgba(59,140,255,0.30)";
+        var haloR = 3.8 + 1.4 * Math.sin(now * 6);
+        ctx.fillStyle = haloColor;
+        ctx.beginPath();
+        ctx.arc(-3.8, 0, haloR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.save();
+        ctx.shadowColor = beaconColor;
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = beaconColor;
+        ctx.beginPath();
+        ctx.arc(-3.8, 0, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // 前灯
+      ctx.fillStyle = "#f2fdff";
+      [-4.3, 4.3].forEach(function (wy) {
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(14.6, wy - 1.6, 3.6, 3.2, 1.1);
+        else ctx.rect(14.6, wy - 1.6, 3.6, 3.2);
+        ctx.fill();
+      });
+
+      // 尾灯
+      ctx.fillStyle = alarm ? "#ffffff" : "#ff5a67";
+      [-4.7, 4.7].forEach(function (wy) {
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(-18.0, wy - 1.6, 2.4, 3.2, 0.8);
+        else ctx.rect(-18.0, wy - 1.6, 2.4, 3.2);
+        ctx.fill();
+      });
+
+      // 车头光束，亮度随行进轻微呼吸
+      var beamA = FX ? 0.14 + 0.08 * Math.sin(now * 2.2) : 0.20;
+      var beam = ctx.createLinearGradient(18.6, 0, 31, 0);
+      beam.addColorStop(0, "rgba(226,250,255," + beamA.toFixed(3) + ")");
+      beam.addColorStop(1, "rgba(226,250,255,0)");
+      ctx.fillStyle = beam;
+      ctx.beginPath();
+      ctx.moveTo(18.6, -5.0);
+      ctx.lineTo(31, -9);
+      ctx.lineTo(31, 9);
+      ctx.lineTo(18.6, 5.0);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
     }
 
     ctx.strokeStyle = "rgba(0,229,255,0.35)";
@@ -502,9 +673,12 @@
     }
     setCard("cardAlert", alertText, alertCls);
 
-    var pg = sensor && sensor.progress ? sensor.progress : { finished: 0, total: 0, remain: 0 };
+    var pg = sensor && sensor.progress ? sensor.progress
+             : { finished: 0, total: 0, remain: 0, mode: "idle" };
+    var note = pg.mode === "auto" ? "剩余 " + pg.remain + " 步" :
+               pg.total ? "手动巡检" : "未开始";
     document.getElementById("vTask").innerHTML =
-      pg.finished + " / " + pg.total + "<small>剩余 " + pg.remain + " 步</small>";
+      pg.finished + " / " + pg.total + "<small>" + note + "</small>";
     document.getElementById("vBar").style.width =
       (pg.total ? Math.round((pg.finished / pg.total) * 100) : 0) + "%";
 
@@ -529,6 +703,25 @@
     }
   }
 
+  /* ---------- 动画（行进中或手动短闪期间运行，否则停在最后一帧，避免空转） ---------- */
+  var animOn = false;
+  function fxActive() {
+    return FX && performance.now() < fxUntil;
+  }
+  function startAnim() {
+    if (animOn) return;
+    animOn = true;
+    var step = function () {
+      draw();
+      if ((robot && robot.status === "moving") || fxActive()) {
+        requestAnimationFrame(step);
+      } else {
+        animOn = false;
+      }
+    };
+    requestAnimationFrame(step);
+  }
+
   /* ---------- 轮询 ---------- */
   function poll() {
     if (polling) return;
@@ -545,6 +738,7 @@
         prevCollision = !!sensor.collision;
 
         render();
+        if (FX && ((robot && robot.status === "moving") || fxActive())) startAnim();
       })
       .catch(function () {
         document.getElementById("systext").textContent = "后端连接中断";
@@ -558,8 +752,18 @@
     api("/api/move", { method: "POST", body: JSON.stringify({ direction: direction }) })
       .then(function (res) {
         if (!res.data.ok) {
-          toast(res.data.msg && res.data.msg.indexOf("障碍") >= 0 ? "collision" : "out_bound",
-                res.data.msg || "移动被阻止");
+          var msg = res.data.msg || "移动被阻止";
+          var type = "out_bound";
+          if (msg.indexOf("巡检进行中") >= 0) {
+            type = "plan_failed";
+            msg = "巡检进行中，请先点击「停止任务」再手动控制";
+          } else if (msg.indexOf("障碍") >= 0) {
+            type = "collision";
+          }
+          toast(type, msg);
+        } else if (FX) {
+          // 手动单步成功：触发一次短闪，让操作有即时反馈
+          fxUntil = performance.now() + FX_FLASH_MS;
         }
         poll();
       })
@@ -581,6 +785,16 @@
     speed = SPEEDS[speedIdx];
     document.getElementById("speedNow").textContent = speed + "x";
   };
+
+  /* ---------- 巡检点登记（后端是进度唯一来源） ---------- */
+  function pushPoints() {
+    api("/api/points", { method: "POST", body: JSON.stringify({ points: patrolPoints }) })
+      .then(function (res) {
+        if (!res.data.ok) toast("plan_failed", res.data.msg || "巡检点同步失败");
+        poll();
+      })
+      .catch(function () { toast("plan_failed", "无法连接后端"); });
+  }
 
   function canvasPos(evt) {
     var rect = canvas.getBoundingClientRect();
@@ -610,6 +824,7 @@
       }
       patrolPoints.push([p.cx, p.cy]);
     }
+    pushPoints();
     render();
   });
 
@@ -634,10 +849,26 @@
     api("/api/stop", { method: "POST" }).then(function () { poll(); }).catch(function () {});
   };
 
+  document.getElementById("btnReset").onclick = function () {
+    api("/api/reset", { method: "POST" }).then(function (res) {
+      if (!res.data.ok) { toast("plan_failed", res.data.msg || "复位失败"); return; }
+      patrolPoints = [];
+      plan = [];
+      pathIndex = 0;
+      lastAlert = null;
+      prevCollision = false;
+      prevOut = false;
+      fxUntil = 0;
+      toast("plan_failed", "已复位：机器人回到起点，巡检点与进度已清空");
+      poll();
+    }).catch(function () { toast("plan_failed", "无法连接后端"); });
+  };
+
   document.getElementById("btnClear").onclick = function () {
     patrolPoints = [];
     plan = [];
     pathIndex = 0;
+    pushPoints();
     render();
   };
 
@@ -649,6 +880,11 @@
   }).catch(function () {
     render();
   });
+
+  api("/api/points").then(function (res) {
+    if (res.data && res.data.ok && res.data.points) patrolPoints = res.data.points;
+    render();
+  }).catch(function () {});
 
   poll();
   setInterval(poll, 1000);
