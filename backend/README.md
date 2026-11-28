@@ -7,11 +7,17 @@
 | GET | `/api/map` | 地图尺寸、障碍物、起点、巡检点上限 |
 | GET | `/api/robot` | 机器人 `x` / `y` / `angle` / `status` |
 | POST | `/api/move` | `{"direction": "up/down/left/right"}`，失败 409 |
-| POST | `/api/patrol` | `{"points": [[x,y]], "speed": 1}`，返回 `plan` |
+| GET | `/api/points` | 已登记的巡检点 |
+| POST | `/api/points` | `{"points": [[x,y]]}`，只登记点位、不启动移动；空数组即清空；巡检进行中改点返回 409 |
+| POST | `/api/patrol` | `{"points": [[x,y]], "speed": 1}`，返回 `plan`、`points`、`unreachable`；`speed` 非四档 409 |
+| POST | `/api/speed` | `{"speed": 2}`，运行中改速，从当前格续走；非行进中只记录 |
 | POST | `/api/stop` | 停止巡检 |
-| GET | `/api/sensor` | 传感器读数 + `progress` |
+| POST | `/api/reset` | 复位：机器人回 `(0,0)`，清空巡检点与进度 |
+| GET | `/api/sensor` | 传感器读数 + `progress`（纯读，无副作用） |
 
 字段定义见 [../docs/03_项目架构与接口.md](../docs/03_项目架构与接口.md)。
+
+进度由后台采样线程 `_watch_loop` 每 0.1 秒推进（首次启动巡检时懒创建），因此 `GET` 接口不再改状态、页面不轮询进度也会自己更新。
 
 ## 依赖版本
 
@@ -46,9 +52,17 @@ curl -s -X POST localhost:5050/api/move \
 # 机器人状态
 curl -s localhost:5050/api/robot
 
+# 登记巡检点（手动模式也能推进进度，空数组即清空）
+curl -s -X POST localhost:5050/api/points \
+  -H 'Content-Type: application/json' -d '{"points":[[3,4],[15,5]]}'
+
 # 启动巡检
 curl -s -X POST localhost:5050/api/patrol \
   -H 'Content-Type: application/json' -d '{"points":[[3,4]],"speed":2}'
+
+# 巡检中实时改速（从当前格按新速度续走，不重置进度）
+curl -s -X POST localhost:5050/api/speed \
+  -H 'Content-Type: application/json' -d '{"speed":4}'
 
 # 传感器读数与进度
 curl -s localhost:5050/api/sensor | python3 -m json.tool
@@ -56,6 +70,22 @@ curl -s localhost:5050/api/sensor | python3 -m json.tool
 # 停止
 curl -s -X POST localhost:5050/api/stop
 ```
+
+## 测试
+
+```bash
+pip install -r backend/requirements-dev.txt   # 只装 pytest
+python -m pytest backend/test -q              # 仓库根目录执行
+```
+
+`backend/test/` 现状：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test_api.py` | 九个接口是否都在、各接口校验状态码与错误文案、复位语义、GET 是否纯读 |
+| `test_progress.py` | 严格按顺序计数、乱序不追认、删点回退、追加保进度、自动巡检走满、不轮询也推进 |
+| `test_sim_modules.py` | BFS 直线/绕障/不可达/越界、`patrol()` 路径顺序与跳过不可达点、传感器读数 |
+| `test_sim.py` | 早期两个最小用例，保留 |
 
 ## 运行前提
 
