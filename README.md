@@ -104,8 +104,6 @@ patrol-sim-std/
 └─ AGENTS.md               # 小组协作开发约定
 ```
 
-`backend/sim/` 下三个模块（`robot_sim.py`、`path_planner.py`、`sensor_sim.py`）由各模块负责人按 `docs/03_项目架构与接口.md` 的契约交付后放入该目录，`app.py` 直接导入使用。
-
 ## 接口一览
 
 | 方法 | 路径 | 说明 |
