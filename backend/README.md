@@ -19,7 +19,6 @@
 |---|---|
 | Python | 3.9+（容器 3.11） |
 | Flask | >= 3.0 |
-| pytest | >= 8.0 |
 
 安装：
 
@@ -58,8 +57,6 @@ curl -s localhost:5050/api/sensor | python3 -m json.tool
 curl -s -X POST localhost:5050/api/stop
 ```
 
-## 测试
+## 运行前提
 
-```bash
-pytest backend/tests -q
-```
+`backend/app.py` 依赖 `backend/sim/` 下的 `robot_sim.py`、`path_planner.py`、`sensor_sim.py`，三个文件由各模块负责人按 `docs/03` 交付后放入该目录。

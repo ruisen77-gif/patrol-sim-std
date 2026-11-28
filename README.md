@@ -57,11 +57,6 @@ patrol-sim/
 │  └─ README.md
 ├─ backend/
 │  ├─ app.py              # Flask 入口，六个 API + 托管前端
-│  ├─ sim/                # 三个纯逻辑模块（当前为占位实现）
-│  │  ├─ robot_sim.py
-│  │  ├─ path_planner.py
-│  │  └─ sensor_sim.py
-│  ├─ tests/test_sim.py
 │  ├─ requirements.txt
 │  └─ README.md
 ├─ docs/
@@ -70,7 +65,7 @@ patrol-sim/
 └─ .gitignore
 ```
 
-`backend/sim/` 下三个模块当前是严格遵循接口契约的占位实现，各模块负责人替换同名文件即可，接口不变。
+`backend/sim/` 下三个模块（`robot_sim.py`、`path_planner.py`、`sensor_sim.py`）由各模块负责人按 `docs/03` 的契约交付后放入该目录，`app.py` 直接导入使用。
 
 ## 接口一览
 
@@ -85,11 +80,14 @@ patrol-sim/
 
 完整字段见 [docs/03_项目架构与接口.md](docs/03_项目架构与接口.md)。
 
-## 开发与测试
+## 开发
 
 ```bash
-pytest backend/tests -q
+python backend/app.py            # 默认 0.0.0.0:5050
+PORT=8000 python backend/app.py  # 换端口
 ```
+
+> 目录中不含 `backend/sim/`，需各模块负责人交付后放入才能启动。
 
 ## 文档索引
 
