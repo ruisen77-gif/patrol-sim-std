@@ -1,0 +1,12 @@
+services:
+  patrol-sim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: patrol-sim-std:latest
+    container_name: patrol-sim-std
+    ports:
+      - "5050:5050"
+    environment:
+      - PORT=5050
+    restart: unless-stopped
