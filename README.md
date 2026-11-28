@@ -83,11 +83,17 @@ patrol-sim-std/
 │  ├─ index.html           # 科技 HUD 单页，Canvas 渲染与按钮交互
 │  └─ README.md
 ├─ backend/
+│  ├─ sim/
+│  │  ├─ __init__.py
+│  │  ├─ path_planner.py
+│  │  ├─ robot_sim.py
+│  │  └─ sensor_sim.py
 │  ├─ app.py               # Flask 入口，六个 API + 托管前端
 │  ├─ requirements.txt
 │  ├─ test/                # 单元测试用例
 │  └─ README.md
 ├─ docs/
+│  ├─ 01_项目需求.md
 │  ├─ 02_小组分工.md
 │  ├─ 03_项目架构与接口.md
 │  └─ 04_运行与结业提交.md
