@@ -14,12 +14,8 @@
 | 后端 | Python Flask，六个 REST 接口 |
 | 绘图 | Canvas 2D，DPR 适配 |
 | 仿真 | 纯 Python 标准库：机器人运动、BFS 寻路、虚拟传感器 |
-| CI | GitHub Actions，`compileall` + `pytest` |
-| Docker | Dockerfile + docker compose，一条命令启动 |
 
 ## 快速开始
-
-### 本地运行
 
 ```bash
 python3 -m venv .venv
@@ -29,14 +25,6 @@ python backend/app.py
 ```
 
 打开 <http://localhost:5050>。端口可用环境变量覆盖：`PORT=8000 python backend/app.py`。
-
-### Docker
-
-```bash
-docker compose up --build
-```
-
-打开 <http://localhost:5050>。
 
 ## 功能
 
@@ -66,27 +54,23 @@ docker compose up --build
 patrol-sim/
 ├─ frontend/
 │  ├─ index.html          # 科技 HUD 单页，Canvas 渲染与按钮交互
-│  ├─ README.md
-│  └─ AGENTS.md
+│  └─ README.md
 ├─ backend/
 │  ├─ app.py              # Flask 入口，六个 API + 托管前端
-│  ├─ sim/
-│  │  ├─ __init__.py
-│  │  ├─ robot_sim.py     # 嵌入式仿真：坐标 / 朝向 / 行进
-│  │  ├─ path_planner.py  # 算法：BFS + 多点串联
-│  │  └─ sensor_sim.py    # 人工智能：虚拟传感器
-│  ├─ tests/test_sim.py   # CI 运行的测试
+│  ├─ sim/                # 三个纯逻辑模块（当前为占位实现）
+│  │  ├─ robot_sim.py
+│  │  ├─ path_planner.py
+│  │  └─ sensor_sim.py
+│  ├─ tests/test_sim.py
 │  ├─ requirements.txt
-│  ├─ README.md
-│  └─ AGENTS.md
-├─ docs/                  # 01~04 四份文档
-├─ .github/workflows/ci.yml
-├─ Dockerfile
-├─ docker-compose.yml
+│  └─ README.md
+├─ docs/
+│  └─ 03_项目架构与接口.md
 ├─ README.md
-├─ AGENTS.md
 └─ .gitignore
 ```
+
+`backend/sim/` 下三个模块当前是严格遵循接口契约的占位实现，各模块负责人替换同名文件即可，接口不变。
 
 ## 接口一览
 
@@ -107,13 +91,8 @@ patrol-sim/
 pytest backend/tests -q
 ```
 
-CI 在每次 push 与 PR 时自动运行编译检查与测试（`.github/workflows/ci.yml`）。
-
 ## 文档索引
 
-- [01 项目需求](docs/01_项目需求.md)
-- [02 小组分工](docs/02_小组分工.md)
 - [03 项目架构与接口](docs/03_项目架构与接口.md)
-- [04 运行与结业提交](docs/04_运行与结业提交.md)
 - [后端说明](backend/README.md)
 - [前端说明](frontend/README.md)
