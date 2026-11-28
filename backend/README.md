@@ -71,6 +71,22 @@ curl -s localhost:5050/api/sensor | python3 -m json.tool
 curl -s -X POST localhost:5050/api/stop
 ```
 
+## 测试
+
+```bash
+pip install -r backend/requirements-dev.txt   # 只装 pytest
+python -m pytest backend/test -q              # 仓库根目录执行
+```
+
+`backend/test/` 现状：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test_api.py` | 九个接口是否都在、各接口校验状态码与错误文案、复位语义、GET 是否纯读 |
+| `test_progress.py` | 严格按顺序计数、乱序不追认、删点回退、追加保进度、自动巡检走满、不轮询也推进 |
+| `test_sim_modules.py` | BFS 直线/绕障/不可达/越界、`patrol()` 路径顺序与跳过不可达点、传感器读数 |
+| `test_sim.py` | 早期两个最小用例，保留 |
+
 ## 运行前提
 
 `backend/app.py` 依赖 `backend/sim/` 下的 `robot_sim.py`、`path_planner.py`、`sensor_sim.py`，三个文件由各模块负责人按 `docs/03` 交付后放入该目录。

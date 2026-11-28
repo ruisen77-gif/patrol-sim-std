@@ -28,8 +28,8 @@
 
 ## 3. 目录职责约定
 - `backend/sim/`：算法仿真核心业务代码
-- `backend/test/`：存放单元测试用例
-- `frontend/index.html`：前端HUD可视化页面
+- `backend/test/`：存放单元测试用例（`python -m pytest backend/test -q`）
+- `frontend/`：前端页面，拆分为 `index.html`（骨架）、`style.css`（样式）、`app.js`（Canvas 绘制 / 交互 / 轮询）；`frontend/test/smoke.mjs` 为前端冒烟测试（`node frontend/test/smoke.mjs`）
 - `docs/`：全部设计、分工、接口、部署文档，**不存放业务源码**
 - Dockerfile、docker‑compose.yml、AGENTS.md、README.md放置于项目根目录
 
@@ -72,6 +72,13 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r backend/requirements.txt
 python backend/app.py
+```
+
+运行测试（项目根目录执行）
+```bash
+pip install -r backend/requirements-dev.txt
+python -m pytest backend/test -q      # 后端：接口契约、进度口径、sim 模块
+node frontend/test/smoke.mjs          # 前端：资源引用、脚本语法、关键逻辑冒烟
 ```
 
 Docker Compose 启动（项目根目录）
